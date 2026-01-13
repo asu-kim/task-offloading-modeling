@@ -1,0 +1,22 @@
+target Python
+
+import AGX from "../lib/AGX.lf"
+import A6000 from "../lib/A6000.lf"
+import Blackwell from "../lib/Blackwell.lf"
+
+reactor Scheduler {
+    
+}
+
+reactor Visulizer {
+
+}
+
+main reactor {
+    s = new Scheduler()
+    e = new AGX()
+    a = new A6000()
+    b = new Blackwell()
+    v = new Visulizer()
+}
+
