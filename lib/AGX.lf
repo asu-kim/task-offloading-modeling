@@ -1,9 +1,11 @@
 target Python
 
 preamble {=
-    
+
 =}
 
 reactor AGX {
+    reaction(startup) {=
 
+    =}
 }

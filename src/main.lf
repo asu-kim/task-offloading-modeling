@@ -9,7 +9,130 @@ reactor Scheduler {
 }
 
 reactor Visulizer {
-
+    reaction(startup) {=
+        import tkinter as tk
+        from tkinter import filedialog, messagebox
+        
+        root = tk.Tk()
+        root.title("Task Offloading Configuration")
+        root.geometry("600x600")
+        
+        # Title
+        title_label = tk.Label(root, text="Task Offloading Parameters", font=("Arial", 16, "bold"))
+        title_label.pack(pady=15)
+        
+        # Input fields frame
+        input_frame = tk.Frame(root)
+        input_frame.pack(pady=10, padx=20, fill=tk.BOTH, expand=True)
+        
+        # Number of Tasks
+        tasks_frame = tk.Frame(input_frame)
+        tasks_frame.pack(pady=8, fill=tk.X)
+        tk.Label(tasks_frame, text="Number of Tasks:", width=20, anchor='w', font=("Arial", 11)).pack(side=tk.LEFT, padx=5)
+        tasks_entry = tk.Entry(tasks_frame, width=30, font=("Arial", 11))
+        tasks_entry.pack(side=tk.LEFT, padx=5)
+        
+        # Number of Device A
+        device_a_frame = tk.Frame(input_frame)
+        device_a_frame.pack(pady=8, fill=tk.X)
+        tk.Label(device_a_frame, text="Number of Device A:", width=20, anchor='w', font=("Arial", 11)).pack(side=tk.LEFT, padx=5)
+        device_a_entry = tk.Entry(device_a_frame, width=30, font=("Arial", 11))
+        device_a_entry.pack(side=tk.LEFT, padx=5)
+        
+        # Number of Device B
+        device_b_frame = tk.Frame(input_frame)
+        device_b_frame.pack(pady=8, fill=tk.X)
+        tk.Label(device_b_frame, text="Number of Device B:", width=20, anchor='w', font=("Arial", 11)).pack(side=tk.LEFT, padx=5)
+        device_b_entry = tk.Entry(device_b_frame, width=30, font=("Arial", 11))
+        device_b_entry.pack(side=tk.LEFT, padx=5)
+        
+        # Number of Device C
+        device_c_frame = tk.Frame(input_frame)
+        device_c_frame.pack(pady=8, fill=tk.X)
+        tk.Label(device_c_frame, text="Number of Device C:", width=20, anchor='w', font=("Arial", 11)).pack(side=tk.LEFT, padx=5)
+        device_c_entry = tk.Entry(device_c_frame, width=30, font=("Arial", 11))
+        device_c_entry.pack(side=tk.LEFT, padx=5)
+        
+        # CSV File Browser
+        csv_frame = tk.Frame(input_frame)
+        csv_frame.pack(pady=8, fill=tk.X)
+        tk.Label(csv_frame, text="CSV File:", width=20, anchor='w', font=("Arial", 11)).pack(side=tk.LEFT, padx=5)
+        csv_path_var = tk.StringVar(value="No file selected")
+        csv_label = tk.Label(csv_frame, textvariable=csv_path_var, width=30, anchor='w', relief=tk.SUNKEN, bg="white")
+        csv_label.pack(side=tk.LEFT, padx=5)
+        
+        def browse_csv():
+            filename = filedialog.askopenfilename(
+                title="Select CSV File",
+                filetypes=(("CSV files", "*.csv"), ("All files", "*.*"))
+            )
+            if filename:
+                csv_path_var.set(filename)
+        
+        browse_btn = tk.Button(csv_frame, text="Browse", command=browse_csv, width=10)
+        browse_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Output display
+        output_label = tk.Label(root, text="Output:", font=("Arial", 12, "bold"))
+        output_label.pack(pady=(20, 5))
+        
+        output_text = tk.Text(root, height=8, width=65, state="normal", font=("Courier", 10))
+        output_text.pack(pady=5, padx=20)
+        
+        # Button callbacks
+        def on_submit():
+            num_tasks = tasks_entry.get()
+            num_device_a = device_a_entry.get()
+            num_device_b = device_b_entry.get()
+            num_device_c = device_c_entry.get()
+            csv_file = csv_path_var.get()
+            
+            if not all([num_tasks, num_device_a, num_device_b, num_device_c]):
+                messagebox.showwarning("Incomplete Input", "Please fill in all fields!")
+                return
+            
+            # Print to console
+            print("=== Configuration ===")
+            print(f"Number of Tasks: {num_tasks}")
+            print(f"Number of Device A: {num_device_a}")
+            print(f"Number of Device B: {num_device_b}")
+            print(f"Number of Device C: {num_device_c}")
+            if csv_file == "No file selected":
+                print("CSV File: No file")
+            else:
+                print(f"CSV File: {csv_file}")
+            print("====================")
+            
+            # Display in GUI
+            output_text.insert(tk.END, "=== Configuration ===\n")
+            output_text.insert(tk.END, f"Tasks: {num_tasks}\n")
+            output_text.insert(tk.END, f"Device A: {num_device_a}\n")
+            output_text.insert(tk.END, f"Device B: {num_device_b}\n")
+            output_text.insert(tk.END, f"Device C: {num_device_c}\n")
+            output_text.insert(tk.END, f"CSV: {csv_file}\n")
+            output_text.insert(tk.END, "====================\n\n")
+            output_text.see(tk.END)
+        
+        def on_clear():
+            tasks_entry.delete(0, tk.END)
+            device_a_entry.delete(0, tk.END)
+            device_b_entry.delete(0, tk.END)
+            device_c_entry.delete(0, tk.END)
+            csv_path_var.set("Not selected")
+            output_text.delete(1.0, tk.END)
+        
+        # Buttons
+        button_frame = tk.Frame(root)
+        button_frame.pack(pady=15)
+        
+        submit_btn = tk.Button(button_frame, text="Submit", command=on_submit, bg="lightgreen", fg="black", width=12, font=("Arial", 11))
+        submit_btn.pack(side=tk.LEFT, padx=10)
+        
+        clear_btn = tk.Button(button_frame, text="Clear", command=on_clear, bg="lightcoral", fg="black", width=12, font=("Arial", 11))
+        clear_btn.pack(side=tk.LEFT, padx=10)
+        
+        root.mainloop()
+    =}
 }
 
 main reactor {
