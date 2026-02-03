@@ -1,10 +1,13 @@
 target Python
+preamble {=
+    import time
+=}
 
 reactor AGX(device_index = 0) {
-    state execution_time = [4, 8]
+    // state execution_time = [4, 8]
     state task_queue = []
     state tasks = []
-    state input_data = []
+    state current_task_index = 0
     input tasks_to_run
     input in_port
     // input recv_a6000
@@ -15,28 +18,12 @@ reactor AGX(device_index = 0) {
     // output send_blackwell
     output out_port
 
-    reaction(startup) {=
-        # Task 0 and Task 1's input data is generated here
-        import csv as csv_module
-        task_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Tasks.csv"
-        # Initialize tasks
-        df = pd.read_csv(task_csv_path)
+    state input_data
+    state output_data
 
-        index = 0
-        # Initialize Task list
-        for _, row in df.iterrows():
-            task = Task(
-                name=row.iloc[0],
-                index=index,
-                deadline = row.iloc[1],
-                execution_times=[int(row.iloc[2]), int(row.iloc[3]), int(row.iloc[4])],
-                input_size=int(row.iloc[5]),
-                output_size=int(row.iloc[6]),
-                source_device_index=0  # Will be set later for source tasks
-                # destination_device_index=int(row.iloc[8])
-            )
-            self.tasks.append(task)
-            index += 1
+    reaction(startup) {=
+        self.input_data = {"I1": True, "I2": True, "L1": False, "L2": False}
+        self.output_data = {"I1": None, "I2": None, "L1": False, "L2": False}
     =}
 
     reaction(tasks_to_run) -> start_execution {=
@@ -48,6 +35,12 @@ reactor AGX(device_index = 0) {
         print("")
 
         # Schedule execution if input data is ready
+        task = self.task_queue[self.current_task_index]
+        task_name = task.name
+        if self.input_data[task_name] is True:
+            # schedule
+            print(f"Schedule task {task_name} at logical time {lf.time.logical_elapsed()}")
+            start_execution.schedule(0)
     =}
 
     // reaction(recv_a6000, recv_blackwell) {=
@@ -58,12 +51,26 @@ reactor AGX(device_index = 0) {
 
     reaction(in_port) -> start_execution {=
         # Schedule execution if input data is ready
+        task = in_port.value
+        task_name = task.name
+        if self.input_data[task_name] is True:
+            # schedule
+            print(f"Schedule task {task_name} at logical time {lf.time.logical_elapsed()}")
+            start_execution.schedule(0)
     =}
 
     reaction(start_execution) -> end_execution {=
-        exec_time = self.execution_time[task_to_run.value]
-        end_execution.schedule(MSEC(time_elapsing))
-    =} deadline(1 msec) {=
+        elapsed_logical_time = lf.time.logical_elapsed()
+        elapsed_physicl_time = lf.time.physical_elapsed()
+
+        task = self.task_queue[self.current_task_index]
+        print(f"Execute task {task.name}")
+        print(f"Tag = ({elapsed_logical_time}, {lf.tag().microstep}) and physical time = {elapsed_physicl_time}")
+        exec_time = task.execution_times[self.device_index]
+        time.sleep(exec_time/1000)
+        self.check_deadline()
+        end_execution.schedule(MSEC(exec_time))
+    =} deadline(10 msec) {=
         print("In deadline handler.")
         elapsed_logical_time = lf.time.logical_elapsed()
         elapsed_physicl_time = lf.time.physical_elapsed()
@@ -71,6 +78,19 @@ reactor AGX(device_index = 0) {
     =}
 
     reaction(end_execution) -> start_execution, out_port {=
+        # Send task though the output port.
+
         # Schedule next execution if input data is ready
+        self.current_task_index += 1
+
+        if self.current_task_index >= len(self.task_queue):
+            print(f"AGX: finish executing all scheduled tasks")
+        else:
+            task = self.task_queue[self.current_task_index]
+            task_name = task.name
+            if self.input_data[task_name] is True:
+                # schedule
+                print(f"Schedule task {task_name} at logical time {lf.time.logical_elapsed()}")
+                start_execution.schedule(0)
     =}
 }
