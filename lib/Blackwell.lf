@@ -1,34 +1,55 @@
 target Python
 
-reactor Blackwell {
+reactor Blackwell(device_index = 1) {
     state execution_time = [3, 5]
     state task_queue = []
     input tasks_to_run
     input in_port
-    input recv_a6000
-    input recv_agx
+    // input recv_a6000
+    // input recv_agx
+    logical action start_execution
     logical action end_execution
-    output send_a6000
-    output send_agx
+    // output send_a6000
+    // output send_agx
     output out_port
 
-    reaction(tasks_to_run) {=
+    reaction(tasks_to_run) -> start_execution {=
         # Receive the tasks to run and set state variable
+        # Schedule the communication as well
+        print("In Blackwell")
         self.task_queue = tasks_to_run.value
         print(self.task_queue)
+        print("")
     =}
 
-    reaction(tasks_to_run, recv_a6000, recv_agx) {=
-        # if not task_name.is_present or not input_data.is_present:
-        #     sys.stderr.write("ERROR: Both should be present.\n")
-        #     exit(1)
+    // reaction(recv_agx, recv_blackwell) {=
+    //     # TODO: run the scheduled tasks when the input data is coming.
+    //     # if not task_name.is_present or not input_data.is_present:
+    //     #     sys.stderr.write("ERROR: Both should be present.\n")
+    //     #     exit(1)
+    // =}
+
+    reaction(in_port) -> start_execution {=
+        # The packet format: [Destination, Task name, size, In or Out]
+        task = self.in_port.value
+        if type(task) is not Task:
+            sys.exit("Error: this must be a task")
+        
     =}
 
-    reaction(in_port) -> end_execution {=
-        exec_time = self.execution_time[task_to_run.value]
-        end_execution.schedule(MSEC(time_elapsing))
+    reaction(start_execution) -> end_execution {=
+        if type(self.current_task) is not Task:
+            sys.exit("Error: this must be a task")
+        exec_time = self.current_task.execution_times[self.device_index]
+        time.sleep(exec_time)
+        end_execution.schedule(MSEC(exec_time))
+    =} deadline(1 msec) {=
+        print("In Blackwell's deadline handler.")
+        elapsed_logical_time = lf.time.logical_elapsed()
+        elapsed_physicl_time = lf.time.physical_elapsed()
+        print(f"Logical time = {elapsed_logical_time} and physical time = {elapsed_physicl_time}")
     =}
 
-    reaction(end_execution) -> send_agx, send_a6000, out_port {=
+    reaction(end_execution) -> start_execution, out_port {=
     =}
 }

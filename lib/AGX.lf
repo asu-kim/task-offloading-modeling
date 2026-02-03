@@ -1,19 +1,22 @@
 target Python
 
-reactor AGX {
+reactor AGX(device_index = 0) {
     state execution_time = [4, 8]
     state task_queue = []
     state tasks = []
+    state input_data = []
     input tasks_to_run
     input in_port
-    input recv_a6000
-    input recv_blackwell
+    // input recv_a6000
+    // input recv_blackwell
+    logical action start_execution
     logical action end_execution
-    output send_a6000
-    output send_blackwell
+    // output send_a6000
+    // output send_blackwell
     output out_port
 
     reaction(startup) {=
+        # Task 0 and Task 1's input data is generated here
         import csv as csv_module
         task_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Tasks.csv"
         # Initialize tasks
@@ -36,23 +39,38 @@ reactor AGX {
             index += 1
     =}
 
-    reaction(tasks_to_run) {=
+    reaction(tasks_to_run) -> start_execution {=
         # Receive the tasks to run and set state variable
+        # Schedule the communication as well
+        print("In AGX")
         self.task_queue = tasks_to_run.value
         print(self.task_queue)
+        print("")
+
+        # Schedule execution if input data is ready
     =}
 
-    reaction(recv_a6000, recv_blackwell) {=
-        # if not task_name.is_present or not input_data.is_present:
-        #     sys.stderr.write("ERROR: Both should be present.\n")
-        #     exit(1)
+    // reaction(recv_a6000, recv_blackwell) {=
+    //     # if not task_name.is_present or not input_data.is_present:
+    //     #     sys.stderr.write("ERROR: Both should be present.\n")
+    //     #     exit(1)
+    // =}
+
+    reaction(in_port) -> start_execution {=
+        # Schedule execution if input data is ready
     =}
 
-    reaction(in_port) -> end_execution {=
+    reaction(start_execution) -> end_execution {=
         exec_time = self.execution_time[task_to_run.value]
         end_execution.schedule(MSEC(time_elapsing))
+    =} deadline(1 msec) {=
+        print("In deadline handler.")
+        elapsed_logical_time = lf.time.logical_elapsed()
+        elapsed_physicl_time = lf.time.physical_elapsed()
+        print(f"Logical time = {elapsed_logical_time} and physical time = {elapsed_physicl_time}")
     =}
 
-    reaction(end_execution) -> send_a6000, send_blackwell, out_port {=
+    reaction(end_execution) -> start_execution, out_port {=
+        # Schedule next execution if input data is ready
     =}
 }

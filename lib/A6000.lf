@@ -1,35 +1,60 @@
 target Python
 
-reactor A6000 {
+reactor A6000(device_index = 2) {
+    preamble {=
+        import time
+    =}
+
     state execution_time = [2, 4]
     state task_queue = []
+    state current_task
     input tasks_to_run
-    input recv_agx
-    input recv_blackwell
+    // input recv_agx
+    // input recv_blackwell
     input in_port
+    logical action start_execution
     logical action end_execution
-    output send_agx
-    output send_blackwell
+    // output send_agx
+    // output send_blackwell
     output out_port
 
-    reaction(tasks_to_run) {=
+    reaction(tasks_to_run) -> start_execution {=
         # Receive the tasks to run and set state variable
+        # Schedule the communication as well
+        print("In A6000")
         self.task_queue = tasks_to_run.value
         print(self.task_queue)
+        print("")
     =}
 
-    reaction(recv_agx, recv_blackwell) {=
-        # TODO: run the scheduled tasks when the input data is coming.
-        # if not task_name.is_present or not input_data.is_present:
-        #     sys.stderr.write("ERROR: Both should be present.\n")
-        #     exit(1)
+    // reaction(recv_agx, recv_blackwell) {=
+    //     # TODO: run the scheduled tasks when the input data is coming.
+    //     # if not task_name.is_present or not input_data.is_present:
+    //     #     sys.stderr.write("ERROR: Both should be present.\n")
+    //     #     exit(1)
+    // =}
+
+    reaction(in_port) -> start_execution {=
+        # The packet format: [Destination, Task name, size, In or Out]
+        task = self.in_port.value
+        if type(task) is not Task:
+            sys.exit("Error: this must be a task")
+        
     =}
 
-    reaction(in_port) -> end_execution {=
-        exec_time = self.execution_time[task_to_run.value]
-        end_execution.schedule(MSEC(time_elapsing))
+    reaction(start_execution) -> end_execution {=
+        if type(self.current_task) is not Task:
+            sys.exit("Error: this must be a task")
+        exec_time = self.current_task.execution_times[self.device_index]
+        time.sleep(exec_time)
+        end_execution.schedule(MSEC(exec_time))
+    =} deadline(1 msec) {=
+        print("In A6000's deadline handler.")
+        elapsed_logical_time = lf.time.logical_elapsed()
+        elapsed_physicl_time = lf.time.physical_elapsed()
+        print(f"Logical time = {elapsed_logical_time} and physical time = {elapsed_physicl_time}")
     =}
 
-    reaction(end_execution) -> send_agx, send_blackwell, out_port {=
+    reaction(end_execution) -> start_execution, out_port {=
     =}
 }

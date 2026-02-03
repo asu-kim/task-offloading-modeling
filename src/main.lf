@@ -984,19 +984,23 @@ reactor Scheduler {
 
         global_deadline = system.period
         job_assignments = main_loop(system, reset_state=True)
-        print(job_assignments)
+        # print(job_assignments)
         
         # Group task indexes by device
         device_task_indexes = [[] for _ in range(system.num_devices)]
+        device_task = [[] for _ in range(system.num_devices)]
         for assignment in job_assignments:
             device_index = assignment["device"].index
             task_index = assignment["job"].index
+            task = assignment["job"]
+
             device_task_indexes[device_index].append(task_index)
+            device_task[device_index].append(task)
         
         print(device_task_indexes)
-        tasks_to_run[0].set(device_task_indexes[0])
-        tasks_to_run[1].set(device_task_indexes[1])
-        tasks_to_run[2].set(device_task_indexes[2])
+        tasks_to_run[0].set(device_task[0])
+        tasks_to_run[1].set(device_task[1])
+        tasks_to_run[2].set(device_task[2])
     =}
 }
 
@@ -1253,4 +1257,7 @@ main reactor {
     // a.send_agx -> r.recv_a6000 after 5 msec
     // b.send_a6000 -> a.recv_blackwell after 3 msec
     // b.send_agx -> r.recv_blackwell after 2 msec
+
+    //check_deadline
+    // LET by physical time or WCET
 }
