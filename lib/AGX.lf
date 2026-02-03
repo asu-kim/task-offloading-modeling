@@ -2,21 +2,57 @@ target Python
 
 reactor AGX {
     state execution_time = [4, 8]
-    input task_to_run
+    state task_queue = []
+    state tasks = []
+    input tasks_to_run
+    input in_port
     input recv_a6000
     input recv_blackwell
     logical action end_execution
     output send_a6000
     output send_blackwell
+    output out_port
 
-    reaction(task_to_run, recv_a6000, recv_blackwell) {=
+    reaction(startup) {=
+        import csv as csv_module
+        task_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Tasks.csv"
+        # Initialize tasks
+        df = pd.read_csv(task_csv_path)
+
+        index = 0
+        # Initialize Task list
+        for _, row in df.iterrows():
+            task = Task(
+                name=row.iloc[0],
+                index=index,
+                deadline = row.iloc[1],
+                execution_times=[int(row.iloc[2]), int(row.iloc[3]), int(row.iloc[4])],
+                input_size=int(row.iloc[5]),
+                output_size=int(row.iloc[6]),
+                source_device_index=0  # Will be set later for source tasks
+                # destination_device_index=int(row.iloc[8])
+            )
+            self.tasks.append(task)
+            index += 1
+    =}
+
+    reaction(tasks_to_run) {=
+        # Receive the tasks to run and set state variable
+        self.task_queue = tasks_to_run.value
+        print(self.task_queue)
+    =}
+
+    reaction(recv_a6000, recv_blackwell) {=
         # if not task_name.is_present or not input_data.is_present:
         #     sys.stderr.write("ERROR: Both should be present.\n")
         #     exit(1)
-        time_elapsing = execution_time[task_to_run.value]
+    =}
+
+    reaction(in_port) -> end_execution {=
+        exec_time = self.execution_time[task_to_run.value]
         end_execution.schedule(MSEC(time_elapsing))
     =}
 
-    reaction(end_execution) -> send_a6000, send_blackwell {=
+    reaction(end_execution) -> send_a6000, send_blackwell, out_port {=
     =}
 }

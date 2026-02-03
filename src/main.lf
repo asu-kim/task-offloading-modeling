@@ -1137,7 +1137,92 @@ reactor SchedulingResult {
 }
 
 reactor NetworkFabric {
-    // TODO
+    // network packet format: [destination, payload size]
+    input in_port0
+    input in_port1
+    input in_port2
+    logical action out_port0_trigger
+    logical action out_port1_trigger
+    logical action out_port2_trigger
+    output out_port0
+    output out_port1
+    output out_port2
+
+    state num_devices = 3
+    state bandwidth
+    state devices
+
+    reaction(startup) {=
+        bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Bandwidth.csv"
+
+        self.devices = [Device() for _ in range(self.num_devices)]
+        self.bandwidth = [[0] * self.num_devices for _ in range(self.num_devices)]
+
+        # Load bandwidths from CSV
+        # Read with pandas and strip whitespace from column names
+        comm_df = pd.read_csv(bandwidth_csv_path, index_col=0)
+        # Strip whitespace from both column names and index names
+        comm_df.columns = comm_df.columns.str.strip()
+        comm_df.index = comm_df.index.str.strip()
+        
+        # Get device names from CSV columns
+        csv_device_names = list(comm_df.columns)
+        csv_index_names = list(comm_df.index)
+        
+        # Verify that CSV has the correct number of devices
+        if len(csv_device_names) != self.num_devices:
+            sys.exit(f"Error: Bandwidth CSV has {len(csv_device_names)} devices, but num_devices={self.num_devices}")
+        if len(csv_index_names) != self.num_devices:
+            sys.exit(f"Error: Bandwidth CSV index has {len(csv_index_names)} devices, but num_devices={self.num_devices}")
+        
+        # Verify that column names and index names match (they should for a symmetric bandwidth matrix)
+        if csv_device_names != csv_index_names:
+            sys.exit(f"Error: Bandwidth CSV column names and index names do not match. Columns: {csv_device_names}, Index: {csv_index_names}")
+        
+        # Assign device names from CSV columns (in order, preserves duplicates)
+        for i, device in enumerate(self.devices):
+            device.name = csv_device_names[i]
+            device.index = i
+        
+        # Populate bandwidth matrix directly from CSV
+        # Access by position using .values to avoid issues with duplicate column/index names
+        # Since CSV rows are in the same order as devices, use device index directly as row index
+        comm_values = comm_df.values  # Get numpy array
+        for i, device in enumerate(self.devices):
+            device_name = device.name
+            # Verify the device name matches the CSV row (for validation)
+            csv_row_name = comm_df.index[i]
+            if csv_row_name != device_name:
+                sys.exit(f"Error: Device name mismatch at index {i}. Expected {device_name}, found {csv_row_name} in CSV.")
+            
+            # Use device index directly as row index (CSV rows are in device order)
+            row_idx = i
+            
+            for j, target_device in enumerate(self.devices):
+                # Access by position using numpy array
+                value = comm_values[row_idx, j]
+                # Check if value is NaN (numpy.nan)
+                if pd.isna(value) or (isinstance(value, float) and (value != value)):  # NaN check: value != value
+                    sys.exit("Error: No NA is expected.")
+                else:
+                    self.bandwidth[i][j] = int(value)
+        print("In Network Febric, bandwidth:")
+        print(self.bandwidth)
+    =}
+
+    reaction(in_port0, in_port1, in_port2) -> out_port0_trigger, out_port1_trigger, out_port2_trigger{=
+
+    =}
+
+    reaction(out_port0_trigger) -> out_port0 {=
+
+    =}
+    reaction(out_port1_trigger) -> out_port1 {=
+        
+    =}
+    reaction(out_port2_trigger) -> out_port2 {=
+        
+    =}
 }
 
 main reactor {
@@ -1146,17 +1231,26 @@ main reactor {
     b = new Blackwell()
     a = new A6000()
     // v = new Visulizer()
-    sr = new SchedulingResult()
+    // sr = new SchedulingResult()
     n = new NetworkFabric()
 
     // v.csv_path -> s.csv_path
-    s.tasks_to_run -> r.task_to_run, b.task_to_run, a.task_to_run
-    s.tasks_to_run -> sr.tasks_to_run
+    s.tasks_to_run -> r.tasks_to_run, b.tasks_to_run, a.tasks_to_run
+    // s.tasks_to_run -> sr.tasks_to_run
 
-    r.send_a6000 -> a.recv_agx after 5 msec
-    r.send_blackwell -> b.recv_agx after 2 msec
-    a.send_blackwell -> b.recv_a6000 after 3 msec
-    a.send_agx -> r.recv_a6000 after 5 msec
-    b.send_a6000 -> a.recv_blackwell after 3 msec
-    b.send_agx -> r.recv_blackwell after 2 msec
+    r.out_port -> n.in_port0 after 1 ms
+    n.out_port0 -> r.in_port after 1 ms
+    
+    b.out_port -> n.in_port1 after 2 ms
+    n.out_port1 -> b.in_port after 2 ms
+
+    a.out_port -> n.in_port2 after 3 ms
+    n.out_port2 -> a.in_port after 3 ms
+
+    // r.send_a6000 -> a.recv_agx after 5 msec
+    // r.send_blackwell -> b.recv_agx after 2 msec
+    // a.send_blackwell -> b.recv_a6000 after 3 msec
+    // a.send_agx -> r.recv_a6000 after 5 msec
+    // b.send_a6000 -> a.recv_blackwell after 3 msec
+    // b.send_agx -> r.recv_blackwell after 2 msec
 }

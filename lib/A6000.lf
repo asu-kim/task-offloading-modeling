@@ -1,27 +1,35 @@
 target Python
 
 reactor A6000 {
-    state execution_time = [4, 8]
-    input task_to_run
+    state execution_time = [2, 4]
+    state task_queue = []
+    input tasks_to_run
     input recv_agx
     input recv_blackwell
+    input in_port
     logical action end_execution
     output send_agx
     output send_blackwell
+    output out_port
 
-    reaction(startup) {=
+    reaction(tasks_to_run) {=
         # Receive the tasks to run and set state variable
+        self.task_queue = tasks_to_run.value
+        print(self.task_queue)
     =}
 
-    reaction(task_to_run, recv_agx, recv_blackwell) {=
+    reaction(recv_agx, recv_blackwell) {=
         # TODO: run the scheduled tasks when the input data is coming.
         # if not task_name.is_present or not input_data.is_present:
         #     sys.stderr.write("ERROR: Both should be present.\n")
         #     exit(1)
-        time_elapsing = execution_time[task_to_run.value]
+    =}
+
+    reaction(in_port) -> end_execution {=
+        exec_time = self.execution_time[task_to_run.value]
         end_execution.schedule(MSEC(time_elapsing))
     =}
 
-    reaction(end_execution) -> send_agx, send_blackwell {=
+    reaction(end_execution) -> send_agx, send_blackwell, out_port {=
     =}
 }
