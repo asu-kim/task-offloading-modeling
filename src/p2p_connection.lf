@@ -1136,10 +1136,6 @@ reactor SchedulingResult {
     input[3] tasks_to_run
 }
 
-reactor NetworkFabric {
-    // TODO
-}
-
 main reactor {
     s = new Scheduler()
     r = new AGX()
@@ -1147,7 +1143,6 @@ main reactor {
     a = new A6000()
     // v = new Visulizer()
     sr = new SchedulingResult()
-    n = new NetworkFabric()
 
     // v.csv_path -> s.csv_path
     s.tasks_to_run -> r.task_to_run, b.task_to_run, a.task_to_run

@@ -1,9 +1,22 @@
 target Python
 
-preamble {=
-    
-=}
-
 reactor Blackwell {
+    state execution_time = [4, 8]
+    input task_to_run
+    input recv_a6000
+    input recv_agx
+    logical action end_execution
+    output send_a6000
+    output send_agx
 
+    reaction(task_to_run, recv_a6000, recv_agx) {=
+        # if not task_name.is_present or not input_data.is_present:
+        #     sys.stderr.write("ERROR: Both should be present.\n")
+        #     exit(1)
+        time_elapsing = execution_time[task_to_run.value]
+        end_execution.schedule(MSEC(time_elapsing))
+    =}
+
+    reaction(end_execution) -> send_a6000, send_agx {=
+    =}
 }
