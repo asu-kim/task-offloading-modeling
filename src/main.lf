@@ -310,8 +310,8 @@ preamble {=
         logger.debug(f"computation_start_time = max({last_task_completion_time}, {comm_end_time}) = {computation_start_time}")
         
         # 3. Compute finish time
-        # Map device name to execution time index (0=AGX, 1=Blackwell, 2=A6000)
-        device_name_to_index = {"AGX": 0, "Blackwell": 1, "A6000": 2}
+        # Map device name to execution time index (0=AGX, 1=A6000, 2=Blackwell)
+        device_name_to_index = {"AGX": 0, "A6000": 1, "Blackwell": 2}
         device_type_index = device_name_to_index.get(device.name)
         if device_type_index is None:
             logger.error(f"Unknown device name: {device.name}")
@@ -824,8 +824,8 @@ preamble {=
                 last_job_completion_time = current_time
             
             task.computation_start_time = max(last_job_completion_time, task.communication_end_time)
-            # Map device name to execution time index (0=AGX, 1=Blackwell, 2=A6000) since tasks only have 3 execution times
-            device_name_to_index = {"AGX": 0, "Blackwell": 1, "A6000": 2}
+            # Map device name to execution time index (0=AGX, 1=A6000, 2=Blackwell) since tasks only have 3 execution times
+            device_name_to_index = {"AGX": 0, "A6000": 1, "Blackwell": 2}
             device_type_index = device_name_to_index.get(device.name)
             if device_type_index is None:
                 logger.error(f"Unknown device name: {device.name}")
@@ -965,14 +965,18 @@ reactor Scheduler {
     preamble {=
     =}
 
+    input change
+    input tasks
+
     state AGX = [0, [], [], []] # index, task_queue, send_queue, recv_queue
-    state Blackwell = [1, [], [], []]
     state A6000 = [2, [], [], []]
+    state Blackwell = [1, [], [], []]
     // state tasks = [[0, 6, [4, 3, 2], 4, 4], [1, 10, [8, 5, 4], 4, 1]] # [index, deadline, [exec_time on AGX, exec_time on Blackwell, exec_time on A6000], input_size, output_size]
     // state bandwidth = [[0, 2, 5], [2, 0, 3], [5, 3, 0]] #[[AGX to AGX, AGX to Blackwell, AGX to A6000], [Blackwell to AGX, Blackwell to Blackwell, Blackwell to A6000], [A6000 to AGX, A6000 to Blackwell, A6000 to A6000]]
     output[3] tasks_to_run
+    output[3] communication_map
 
-    reaction(startup) -> tasks_to_run {=
+    reaction(startup, change, tasks) -> tasks_to_run, communication_map {=
         task_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Tasks.csv"
         dependency_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Dependencies.csv"
         bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Bandwidth.csv"
@@ -989,18 +993,55 @@ reactor Scheduler {
         # Group task indexes by device
         device_task_indexes = [[] for _ in range(system.num_devices)]
         device_task = [[] for _ in range(system.num_devices)]
+        # Create a mapping from task index to device index for quick lookup
+        task_to_device = {}
         for assignment in job_assignments:
             device_index = assignment["device"].index
             task_index = assignment["job"].index
             task = assignment["job"]
 
+            # print(f"task: {task.name}, device: {assignment["device"].index}")
+
             device_task_indexes[device_index].append(task_index)
             device_task[device_index].append(task)
+            task_to_device[task_index] = device_index
+        
+        # Build communication map for each device
+        # Format: {task_index: {child_task_index: destination_device_index}}
+        device_comm_map = [{} for _ in range(system.num_devices)]
+        
+        for assignment in job_assignments:
+            task = assignment["job"]
+            task_index = task.index
+            source_device_index = task_to_device[task_index]
+            
+            # For each child task, find its destination device
+            for child_index in task.child_task_indexes:
+                if child_index in task_to_device:
+                    destination_device_index = task_to_device[child_index]
+                    child_task = system.tasks[child_index]
+                    
+                    # Only add to communication map if child is on a different device
+                    if destination_device_index != source_device_index:
+                        if task_index not in device_comm_map[source_device_index]:
+                            device_comm_map[source_device_index][task_index] = {}
+                        device_comm_map[source_device_index][task_index][child_index] = {
+                            "destination_device": destination_device_index,
+                            "child_task": child_task,
+                            "output_size": task.output_size
+                        }
+                        logger.debug(f"Task {task.name} (index {task_index}) on device {source_device_index} "
+                                   f"needs to send output to child {child_task.name} (index {child_index}) "
+                                   f"on device {destination_device_index}")
         
         print(device_task_indexes)
         tasks_to_run[0].set(device_task[0])
         tasks_to_run[1].set(device_task[1])
         tasks_to_run[2].set(device_task[2])
+        
+        communication_map[0].set(device_comm_map[0])
+        communication_map[1].set(device_comm_map[1])
+        communication_map[2].set(device_comm_map[2])
     =}
 }
 
@@ -1136,12 +1177,26 @@ reactor Scheduler {
 //     =}
 // }
 
-reactor SchedulingResult {
-    input[3] tasks_to_run
+reactor EnvironmentUpdateDetector {
+    timer t(0, 10 sec)
+    output change
+    reaction(t) -> change {=
+
+    =}
+}
+
+reactor TaskSetSource {
+    timer t(0, 20 sec)
+    output tasks
+    reaction(t) -> tasks {=
+        
+    =}
 }
 
 reactor NetworkFabric {
     // network packet format: [destination, payload size]
+    input change
+
     input in_port0
     input in_port1
     input in_port2
@@ -1155,12 +1210,14 @@ reactor NetworkFabric {
     state num_devices = 3
     state bandwidth
     state devices
+    state pending_packet  # Store packet temporarily for routing
 
     reaction(startup) {=
         bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Bandwidth.csv"
 
         self.devices = [Device() for _ in range(self.num_devices)]
         self.bandwidth = [[0] * self.num_devices for _ in range(self.num_devices)]
+        self.pending_packet = None
 
         # Load bandwidths from CSV
         # Read with pandas and strip whitespace from column names
@@ -1215,48 +1272,101 @@ reactor NetworkFabric {
     =}
 
     reaction(in_port0, in_port1, in_port2) -> out_port0_trigger, out_port1_trigger, out_port2_trigger{=
-
+        # Determine which input port received the message and route to appropriate output
+        packet = None
+        source_port = None
+        
+        if in_port0.is_present:
+            packet = in_port0.value
+            source_port = 0
+        elif in_port1.is_present:
+            packet = in_port1.value
+            source_port = 1
+        elif in_port2.is_present:
+            packet = in_port2.value
+            source_port = 2
+        
+        if packet is None:
+            return
+        
+        # Store packet in state for output reactions
+        self.pending_packet = packet
+        
+        # Extract destination device from packet
+        if isinstance(packet, dict) and "destination_device" in packet:
+            destination_device = packet["destination_device"]
+            
+            # Route to the appropriate output port based on destination device index
+            # Device 0 = AGX (out_port0), Device 1 = A6000 (out_port1), Device 2 = Blackwell (out_port2)
+            if destination_device == 0:
+                print(f"NetworkFabric: Routing packet from device {source_port} to device 0 (AGX)")
+                out_port0_trigger.schedule(0)
+            elif destination_device == 1:
+                print(f"NetworkFabric: Routing packet from device {source_port} to device 1 (A6000)")
+                out_port1_trigger.schedule(0)
+            elif destination_device == 2:
+                print(f"NetworkFabric: Routing packet from device {source_port} to device 2 (Blackwell)")
+                out_port2_trigger.schedule(0)
+            else:
+                print(f"NetworkFabric: Error - Invalid destination device {destination_device}")
+        else:
+            print(f"NetworkFabric: Error - Invalid packet format")
     =}
 
     reaction(out_port0_trigger) -> out_port0 {=
-
+        # Forward the stored packet
+        if self.pending_packet is not None:
+            out_port0.set(self.pending_packet)
+            self.pending_packet = None
     =}
     reaction(out_port1_trigger) -> out_port1 {=
-        
+        # Forward the stored packet
+        if self.pending_packet is not None:
+            out_port1.set(self.pending_packet)
+            self.pending_packet = None
     =}
     reaction(out_port2_trigger) -> out_port2 {=
-        
+        # Forward the stored packet
+        if self.pending_packet is not None:
+            out_port2.set(self.pending_packet)
+            self.pending_packet = None
     =}
 }
 
 main reactor {
     s = new Scheduler()
-    r = new AGX()
-    b = new Blackwell()
-    a = new A6000()
+    r_1 = new AGX()
+    r_2 = new A6000()
+    r_3 = new Blackwell()
     // v = new Visulizer()
     // sr = new SchedulingResult()
     n = new NetworkFabric()
+    t = new TaskSetSource()
+    e = new EnvironmentUpdateDetector()
+
+    t.tasks, e.change -> s.tasks, s.change
+    e.change -> n.change
 
     // v.csv_path -> s.csv_path
-    s.tasks_to_run -> r.tasks_to_run, b.tasks_to_run, a.tasks_to_run
+    s.tasks_to_run -> r_1.tasks_to_run, r_2.tasks_to_run, r_3.tasks_to_run
+    s.communication_map -> r_1.communication_map, r_3.communication_map, r_2.communication_map
     // s.tasks_to_run -> sr.tasks_to_run
 
-    r.out_port -> n.in_port0 after 1 ms
-    n.out_port0 -> r.in_port after 1 ms
+    r_1.out_port -> n.in_port0 after 1 ms
+    n.out_port0 -> r_1.in_port after 1 ms
+
+    r_2.out_port -> n.in_port1 after 2 ms
+    n.out_port1 -> r_2.in_port after 2 ms
     
-    b.out_port -> n.in_port1 after 2 ms
-    n.out_port1 -> b.in_port after 2 ms
+    r_3.out_port -> n.in_port2 after 3 ms
+    n.out_port2 -> r_3.in_port after 3 ms
 
-    a.out_port -> n.in_port2 after 3 ms
-    n.out_port2 -> a.in_port after 3 ms
-
-    // r.send_a6000 -> a.recv_agx after 5 msec
-    // r.send_blackwell -> b.recv_agx after 2 msec
-    // a.send_blackwell -> b.recv_a6000 after 3 msec
-    // a.send_agx -> r.recv_a6000 after 5 msec
-    // b.send_a6000 -> a.recv_blackwell after 3 msec
-    // b.send_agx -> r.recv_blackwell after 2 msec
+    // r_1.send_a6000 -> r_2.recv_agx after 5 msec
+    // r_1.send_blackwell -> r_3.recv_agx after 2 msec
+    // r_2.send_blackwell -> r_3.recv_a6000 after 3 msec
+    // r_2.send_agx -> r_1.recv_a6000 after 5 msec
+    // r_3.send_a6000 -> r_2.recv_blackwell after 3 msec
+    // r_3.send_agx -> r_1.recv_blackwell after 2 msec
 
     //check_deadline
     // LET by physical time or WCET

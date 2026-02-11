@@ -4,17 +4,16 @@ preamble {=
 =}
 
 reactor A6000(device_index = 2) {
-    preamble {=
-        import time
-    =}
-
     // state execution_time = [2, 4]
     state task_queue = []
-    state current_task
+    state tasks = []
+    state current_task_index = 0
+    state comm_map // Communication map: {task_index: {child_index: {destination_device, child_task, output_size}}}
     input tasks_to_run
+    input communication_map
+    input in_port
     // input recv_agx
     // input recv_blackwell
-    input in_port
     logical action start_execution
     logical action end_execution
     // output send_agx
@@ -24,15 +23,18 @@ reactor A6000(device_index = 2) {
     state input_data
     state output_data
 
-    reaction(tasks_to_run) -> start_execution {=
+    reaction(tasks_to_run, communication_map) -> start_execution {=
+        # TODO: the contents can be array depending on the number of parent
         self.input_data = {"I1": True, "I2": True, "L1": False, "L2": False}
         self.output_data = {"I1": None, "I2": None, "L1": False, "L2": False}
 
-        # Receive the tasks to run and set state variable
+        # Receive the tasks to run and communication map
         # Schedule the communication as well
         print("In A6000")
         self.task_queue = tasks_to_run.value
+        self.comm_map = communication_map.value if communication_map.is_present else {}
         print(self.task_queue)
+        print(f"A6000 communication map: {self.comm_map}")
         print("")
 
         # Schedule execution if input data is ready
@@ -40,7 +42,7 @@ reactor A6000(device_index = 2) {
         task_name = task.name
         if self.input_data[task_name] is True:
             # schedule
-            print(f"Schedule task {task_name} at logical time {lf.time.logical_elapsed()}")
+            print(f"A6000: Schedule task {task_name} at logical time {lf.time.logical_elapsed()}")
             start_execution.schedule(0)
     =}
 
@@ -52,18 +54,48 @@ reactor A6000(device_index = 2) {
     // =}
 
     reaction(in_port) -> start_execution {=
-        # Schedule execution if input data is ready
-        task = in_port.value
-        task_name = task.name
-        if self.input_data[task_name] is True:
-            # schedule
-            print(f"Schedule task {task_name} at logical time {lf.time.logical_elapsed()}")
-            start_execution.schedule(0)
+        # Handle incoming communication packet
+        packet = in_port.value
+        
+        if isinstance(packet, dict) and "child_task" in packet:
+            # This is a communication packet from another device
+            child_task = packet["child_task"]
+            parent_task = packet.get("parent_task")
+            task_name = child_task.name
+            
+            print(f"A6000: Received output from parent task {parent_task.name if parent_task else 'unknown'} "
+                  f"for child task {task_name}")
+            
+            # Mark that input data is ready for this child task
+            if task_name not in self.input_data:
+                self.input_data[task_name] = False
+            self.input_data[task_name] = True
+            
+            # Check if this task is in our queue and ready to execute
+            for i, queued_task in enumerate(self.task_queue):
+                if queued_task.name == task_name and queued_task.index == child_task.index:
+                    # Found the task in queue, check if we should schedule it
+                    if self.input_data[task_name] is True:
+                        # Make sure we're at the right position or update current_task_index
+                        if i == self.current_task_index:
+                            print(f"A6000: Scheduling task {task_name} at logical time {lf.time.logical_elapsed()}")
+                            start_execution.schedule(0)
+                        break
+        else:
+            # Legacy format: assume it's a task object directly
+            task = packet
+            task_name = task.name
+            if task_name in self.input_data and self.input_data[task_name] is True:
+                print(f"A6000: Schedule task {task_name} at logical time {lf.time.logical_elapsed()}")
+                start_execution.schedule(0)
     =}
 
     reaction(start_execution) -> end_execution {=
         elapsed_logical_time = lf.time.logical_elapsed()
         elapsed_physicl_time = lf.time.physical_elapsed()
+        deadline = self.task_queue[self.current_task_index].deadline - elapsed_logical_time / MSEC(1)
+        deadline = 0 if deadline < 0 else deadline
+        self.update_deadline(MSEC(deadline))
 
         task = self.task_queue[self.current_task_index]
         print(f"Execute task {task.name}")
@@ -80,6 +112,32 @@ reactor A6000(device_index = 2) {
     =}
 
     reaction(end_execution) -> start_execution, out_port {=
+        # Get the completed task
+        completed_task = self.task_queue[self.current_task_index]
+        task_index = completed_task.index
+        
+        # Check if this task needs to send outputs to child tasks on other devices
+        if task_index in self.comm_map:
+            # Send outputs to each child task on different devices
+            for child_index, comm_info in self.comm_map[task_index].items():
+                destination_device = comm_info["destination_device"]
+                child_task = comm_info["child_task"]
+                output_size = comm_info["output_size"]
+                
+                # Create a communication packet: [destination_device_index, task_data]
+                # The NetworkFabric will route this to the correct device
+                comm_packet = {
+                    "destination_device": destination_device,
+                    "child_task": child_task,
+                    "parent_task": completed_task,
+                    "output_size": output_size
+                }
+                
+                print(f"A6000: Task {completed_task.name} (index {task_index}) completed. "
+                      f"Sending output to child task {child_task.name} (index {child_index}) "
+                      f"on device {destination_device}")
+                out_port.set(comm_packet)
+        
         self.current_task_index += 1
 
         if self.current_task_index >= len(self.task_queue):
