@@ -1007,13 +1007,32 @@ reactor Scheduler {
             task_to_device[task_index] = device_index
         
         # Build communication map for each device
-        # Format: {task_index: {child_task_index: destination_device_index}}
+        # Format: {task_index: {child_task_index: {destination_device, child_task, output_size}}}
+        # Also includes source tasks: {source_task_index: {"source_input": {destination_device, child_task, input_size}}}
         device_comm_map = [{} for _ in range(system.num_devices)]
         
         for assignment in job_assignments:
             task = assignment["job"]
             task_index = task.index
-            source_device_index = task_to_device[task_index]
+            mapped_device_index = task_to_device[task_index]
+            
+            # Check if this is a source task mapped to a different device than its source_device_index
+            if len(task.child_task_indexes) == 0:
+                source_device_index = task.source_device_index
+                if source_device_index != mapped_device_index:
+                    # Source device needs to send initial input data to the mapped device
+                    if task_index not in device_comm_map[source_device_index]:
+                        device_comm_map[source_device_index][task_index] = {}
+                    # Use a special key "source_input" to indicate this is initial input data
+                    device_comm_map[source_device_index][task_index]["source_input"] = {
+                        "destination_device": mapped_device_index,
+                        "child_task": task,
+                        "input_size": task.input_size,
+                        "is_source_input": True
+                    }
+                    logger.debug(f"Source task {task.name} (index {task_index}) has source_device_index={source_device_index} "
+                               f"but is mapped to device {mapped_device_index}. "
+                               f"Device {source_device_index} needs to send initial input data.")
             
             # For each child task, find its destination device
             for child_index in task.child_task_indexes:
@@ -1022,15 +1041,16 @@ reactor Scheduler {
                     child_task = system.tasks[child_index]
                     
                     # Only add to communication map if child is on a different device
-                    if destination_device_index != source_device_index:
-                        if task_index not in device_comm_map[source_device_index]:
-                            device_comm_map[source_device_index][task_index] = {}
-                        device_comm_map[source_device_index][task_index][child_index] = {
+                    if destination_device_index != mapped_device_index:
+                        if task_index not in device_comm_map[mapped_device_index]:
+                            device_comm_map[mapped_device_index][task_index] = {}
+                        device_comm_map[mapped_device_index][task_index][child_index] = {
                             "destination_device": destination_device_index,
                             "child_task": child_task,
-                            "output_size": task.output_size
+                            "output_size": task.output_size,
+                            "is_source_input": False
                         }
-                        logger.debug(f"Task {task.name} (index {task_index}) on device {source_device_index} "
+                        logger.debug(f"Task {task.name} (index {task_index}) on device {mapped_device_index} "
                                    f"needs to send output to child {child_task.name} (index {child_index}) "
                                    f"on device {destination_device_index}")
         
@@ -1178,18 +1198,130 @@ reactor Scheduler {
 // }
 
 reactor EnvironmentUpdateDetector {
-    timer t(0, 10 sec)
+    // timer t(0, 10 sec)
     output change
-    reaction(t) -> change {=
+    reaction(startup) -> change {=
 
     =}
 }
 
 reactor TaskSetSource {
-    timer t(0, 20 sec)
+    // timer t(0, 20 sec)
     output tasks
-    reaction(t) -> tasks {=
+    reaction(startup) -> tasks {=
         
+    =}
+}
+
+reactor OutputVisualizer {
+    reaction(startup) {=
+        def plot_device_schedule(system, job_assignments, filename=None):
+        # Sort devices by index descending (highest index first)
+        # This gives us: device2, device1, device0
+        devices_sorted = sorted(system.devices, key=lambda d: d.index, reverse=True)
+        num_devices = len(devices_sorted)
+        
+        # Create row mapping: each device gets two rows (comp and comm)
+        # Row order: device2_comp, device2_comm, device1_comp, device1_comm, device0_comp, device0_comm
+        # For device at position i in sorted list (descending), comp row = i*2, comm row = i*2+1
+        device_index_to_comp_row = {}
+        device_index_to_comm_row = {}
+        row_labels = []
+        
+        for i, dev in enumerate(devices_sorted):
+            comp_row = i * 2
+            comm_row = i * 2 + 1
+            device_index_to_comp_row[dev.index] = comp_row
+            device_index_to_comm_row[dev.index] = comm_row
+            row_labels.append(f"{dev.name}_comp")
+            row_labels.append(f"{dev.name}_comm")
+
+        # ---- Build a deterministic color map per task name ----
+        tasks = sorted({a["task_name"] for a in job_assignments})
+        cmap = get_cmap("tab10")  # any qualitative colormap works (tab20, Set3, etc.)
+        task_colors = {task: cmap(i % cmap.N) for i, task in enumerate(tasks)}
+
+        # Adjust figure height based on number of rows (2 rows per device)
+        fig_height = max(4, num_devices * 1.5)
+        fig, ax = plt.subplots(figsize=(12, fig_height))
+        bar_height = 0.6
+
+        # Plot computation bars
+        for a in job_assignments:
+            row = device_index_to_comp_row[a["device"].index]
+            start = a["start_time"]
+            dur = a["completion_time"] - a["start_time"]
+            task = a["task_name"]
+
+            color = task_colors[task]  # <- color for this task type
+
+            ax.broken_barh(
+                [(start, dur)],
+                (row - bar_height/2, bar_height),
+                facecolors=color
+            )
+
+            # Annotate inside bar
+            status = "OK" if a.get("deadline_met", True) else "MISSED"
+            ax.text(
+                start + dur/2, row,
+                f"{task} ({status})",
+                ha="center", va="center",
+                fontsize=8, color="white", clip_on=True
+            )
+
+            # Optional: mark deadlines with dashed vertical lines (only on comp rows)
+            if a.get("deadline") is not None:
+                ax.vlines([a["deadline"]], row - bar_height/2, row + bar_height/2,
+                        linestyles="dashed", alpha=0.6)
+
+        # Plot communication bars from comm_queue
+        for device in devices_sorted:
+            comm_row = device_index_to_comm_row[device.index]
+            
+            for comm_entry in device.comm_queue:
+                task_name, comm_start, comm_end = comm_entry
+                comm_dur = comm_end - comm_start
+                
+                # Get color for this task
+                color = task_colors.get(task_name, "gray")
+                
+                ax.broken_barh(
+                    [(comm_start, comm_dur)],
+                    (comm_row - bar_height/2, bar_height),
+                    facecolors=color,
+                    alpha=0.7  # Slightly transparent to distinguish from computation
+                )
+                
+                # Annotate communication bar
+                ax.text(
+                    comm_start + comm_dur/2, comm_row,
+                    f"{task_name} (comm)",
+                    ha="center", va="center",
+                    fontsize=8, color="white", clip_on=True
+                )
+
+        # ---- Y-axis labeling ----
+        ax.set_yticks(range(len(row_labels)))
+        ax.set_yticklabels(row_labels)
+
+        ax.set_xlabel("Time")
+        ax.set_title("Device Scheduling (colored by task)")
+        ax.grid(axis="x", linestyle="--", alpha=0.4)
+
+        # Legend from task_colors
+        handles = [
+            Line2D([0], [0], color=task_colors[t], lw=8, label=t)
+            for t in tasks
+        ]
+        ax.legend(handles=handles, title="Task types")
+
+        plt.tight_layout()
+        if filename:
+            plt.savefig(filename, dpi=150)
+        plt.show()
+
+        return fig, ax
     =}
 }
 

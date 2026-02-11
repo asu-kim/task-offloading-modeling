@@ -31,7 +31,7 @@ reactor Blackwell(device_index = 1) {
         # Schedule the communication as well
         print("In Blackwell")
         self.task_queue = tasks_to_run.value
-        self.comm_map = communication_map.value if communication_map.is_present else []
+        self.comm_map = communication_map.value if communication_map.is_present else {}
         print(self.task_queue)
         print(f"Blackwell communication map: {self.comm_map}")
         print("")
@@ -60,10 +60,14 @@ reactor Blackwell(device_index = 1) {
             # This is a communication packet from another device
             child_task = packet["child_task"]
             parent_task = packet.get("parent_task")
+            is_source_input = packet.get("is_source_input", False)
             task_name = child_task.name
             
-            print(f"Blackwell: Received output from parent task {parent_task.name if parent_task else 'unknown'} "
-                  f"for child task {task_name}")
+            if is_source_input:
+                print(f"Blackwell: Received initial input data for source task {task_name}")
+            else:
+                print(f"Blackwell: Received output from parent task {parent_task.name if parent_task else 'unknown'} "
+                      f"for child task {task_name}")
             
             # Mark that input data is ready for this child task
             if task_name not in self.input_data:
@@ -100,7 +104,7 @@ reactor Blackwell(device_index = 1) {
         time.sleep(exec_time/1000)
         self.check_deadline()
         end_execution.schedule(MSEC(exec_time))
-    =} deadline(10 msec) {=
+    =} deadline(forever) {=
         print("In deadline handler.")
         elapsed_logical_time = lf.time.logical_elapsed()
         elapsed_physicl_time = lf.time.physical_elapsed()

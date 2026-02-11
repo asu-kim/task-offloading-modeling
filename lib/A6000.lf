@@ -61,10 +61,14 @@ reactor A6000(device_index = 2) {
             # This is a communication packet from another device
             child_task = packet["child_task"]
             parent_task = packet.get("parent_task")
+            is_source_input = packet.get("is_source_input", False)
             task_name = child_task.name
             
-            print(f"A6000: Received output from parent task {parent_task.name if parent_task else 'unknown'} "
-                  f"for child task {task_name}")
+            if is_source_input:
+                print(f"A6000: Received initial input data for source task {task_name}")
+            else:
+                print(f"A6000: Received output from parent task {parent_task.name if parent_task else 'unknown'} "
+                      f"for child task {task_name}")
             
             # Mark that input data is ready for this child task
             if task_name not in self.input_data:
@@ -98,14 +102,15 @@ reactor A6000(device_index = 2) {
         self.update_deadline(MSEC(deadline))
 
         task = self.task_queue[self.current_task_index]
-        print(f"Execute task {task.name}")
-        print(f"Tag = ({elapsed_logical_time}, {lf.tag().microstep}) and physical time = {elapsed_physicl_time}")
+        print(f"A6000: Execute task {task.name}")
+        print(f"A6000: Tag = ({elapsed_logical_time}, {lf.tag().microstep}) and physical time = {elapsed_physicl_time}")
         exec_time = task.execution_times[self.device_index]
         time.sleep(exec_time/1000)
         self.check_deadline()
         end_execution.schedule(MSEC(exec_time))
-    =} deadline(10 msec) {=
-        print("In deadline handler.")
+        self.update_deadline(FOREVER)
+    =} deadline(forever) {=
+        print("In A6000's deadline handler.")
         elapsed_logical_time = lf.time.logical_elapsed()
         elapsed_physicl_time = lf.time.physical_elapsed()
         print(f"Logical time = {elapsed_logical_time} and physical time = {elapsed_physicl_time}")

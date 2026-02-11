@@ -38,6 +38,28 @@ reactor AGX(device_index = 0) {
         print(f"AGX communication map: {self.comm_map}")
         print("")
 
+        # Check for source tasks that need initial input data sent to other devices
+        if isinstance(self.comm_map, dict):
+            for task_index, comm_entries in self.comm_map.items():
+                if isinstance(comm_entries, dict) and "source_input" in comm_entries:
+                    comm_info = comm_entries["source_input"]
+                    destination_device = comm_info["destination_device"]
+                    child_task = comm_info["child_task"]
+                    input_size = comm_info.get("input_size", 0)
+                    
+                    # Create a communication packet for initial input data
+                    comm_packet = {
+                        "destination_device": destination_device,
+                        "child_task": child_task,
+                        "parent_task": None,  # No parent for source input
+                        "input_size": input_size,
+                        "is_source_input": True
+                    }
+                    
+                    print(f"AGX: Sending initial input data for source task {child_task.name} (index {task_index}) "
+                          f"to device {destination_device}")
+                    out_port.set(comm_packet)
+
         # Schedule execution if input data is ready
         task = self.task_queue[self.current_task_index]
         print(f"current task's child tasks = {task.child_task_indexes}")
@@ -94,15 +116,19 @@ reactor AGX(device_index = 0) {
     reaction(start_execution) -> end_execution {=
         elapsed_logical_time = lf.time.logical_elapsed()
         elapsed_physicl_time = lf.time.physical_elapsed()
+        deadline = self.task_queue[self.current_task_index].deadline - elapsed_logical_time / MSEC(1)
+        deadline = 0 if deadline < 0 else deadline
+        self.update_deadline(MSEC(deadline))
 
         task = self.task_queue[self.current_task_index]
-        print(f"Execute task {task.name}")
-        print(f"Tag = ({elapsed_logical_time}, {lf.tag().microstep}) and physical time = {elapsed_physicl_time}")
+        print(f"AGX: Execute task {task.name}")
+        print(f"AGX: Tag = ({elapsed_logical_time}, {lf.tag().microstep}) and physical time = {elapsed_physicl_time}")
         exec_time = task.execution_times[self.device_index]
         time.sleep(exec_time/1000)
         self.check_deadline()
         end_execution.schedule(MSEC(exec_time))
-    =} deadline(10 msec) {=
+        self.update_deadline(FOREVER)
+    =} deadline(forever) {=
         print("In deadline handler.")
         elapsed_logical_time = lf.time.logical_elapsed()
         elapsed_physicl_time = lf.time.physical_elapsed()
