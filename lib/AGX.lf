@@ -4,12 +4,14 @@ preamble {=
     time_unit = 1
 =}
 
-reactor AGX(device_index = 0) {
+reactor AGX(device_index = 0, device_name = "AGX") {
     // state execution_time = [4, 8]
     state task_queue = []
     state tasks = []
     state current_task_index = 0
     state comm_map  // Communication map: {task_index: {child_index: {destination_device, child_task, output_size}}}
+    state trace_events = []
+    state current_comp_start_time = 0.0
     input tasks_to_run
     input communication_map
     input in_port
@@ -21,6 +23,7 @@ reactor AGX(device_index = 0) {
     // output send_blackwell
     output out_port
     output final_output
+    output trace_output
 
     state input_data
     state output_data
@@ -30,7 +33,7 @@ reactor AGX(device_index = 0) {
         self.output_data = {"I1": None, "I2": None, "L1": False, "L2": False}
     =}
 
-    reaction(tasks_to_run, communication_map) -> start_execution, out_port {=
+    reaction(tasks_to_run, communication_map) -> start_execution, out_port, trace_output {=
         # Receive the tasks to run and communication map
         # Schedule the communication as well
         print("In AGX")
@@ -40,6 +43,11 @@ reactor AGX(device_index = 0) {
         print(f"AGX communication map: {self.comm_map}")
         print("")
 
+        if len(self.task_queue) == 0:
+            trace_output.set(self.trace_events)
+            return
+
+        send_time_sec = lf.time.logical_elapsed() / 1e9
         # Check for source tasks that need initial input data sent to other devices
         if isinstance(self.comm_map, dict):
             for task_index, comm_entries in self.comm_map.items():
@@ -49,6 +57,16 @@ reactor AGX(device_index = 0) {
                     child_task = comm_info["child_task"]
                     input_size = comm_info.get("input_size", 0)
                     
+                    # Record communication send in trace
+                    self.trace_events.append({
+                        "type": "comm_send",
+                        "task_name": child_task.name,
+                        "from_device": self.device_index,
+                        "to_device": destination_device,
+                        "start_time": send_time_sec,
+                        "output_size": input_size
+                    })
+
                     # Create a communication packet for initial input data
                     comm_packet = {
                         "destination_device": destination_device,
@@ -117,6 +135,7 @@ reactor AGX(device_index = 0) {
 
     reaction(start_execution) -> end_execution {=
         elapsed_logical_time = lf.time.logical_elapsed()
+        self.current_comp_start_time = elapsed_logical_time / 1e9  # logical time to seconds
         elapsed_physicl_time = lf.time.physical_elapsed()
         deadline = self.task_queue[self.current_task_index].deadline - elapsed_logical_time / SEC(1)
         deadline = 0 if deadline < 0 else deadline
@@ -138,12 +157,24 @@ reactor AGX(device_index = 0) {
         print(f"Logical time = {elapsed_logical_time} and physical time = {elapsed_physicl_time}")
     =}
 
-    reaction(end_execution) -> start_execution, out_port, final_output {=
+    reaction(end_execution) -> start_execution, out_port, final_output, trace_output {=
         print("In AGX: Send output data if needed.")
         # Get the completed task
         completed_task = self.task_queue[self.current_task_index]
         task_index = completed_task.index
-        
+        end_time_sec = lf.time.logical_elapsed() / 1e9
+
+        # Record computation segment in trace
+        self.trace_events.append({
+            "type": "comp",
+            "task_name": completed_task.name,
+            "device_index": self.device_index,
+            "device_name": self.device_name,
+            "start_time": self.current_comp_start_time,
+            "end_time": end_time_sec,
+            "deadline_met": True
+        })
+
         # Check if this task needs to send outputs to child tasks on other devices
         if task_index in self.comm_map:
             # Send outputs to each child task on different devices
@@ -152,6 +183,16 @@ reactor AGX(device_index = 0) {
                 child_task = comm_info["child_task"]
                 output_size = comm_info["output_size"]
                 
+                # Record communication send in trace
+                self.trace_events.append({
+                    "type": "comm_send",
+                    "task_name": completed_task.name,
+                    "from_device": self.device_index,
+                    "to_device": destination_device,
+                    "start_time": end_time_sec,
+                    "output_size": output_size
+                })
+
                 # Create a communication packet: [destination_device_index, task_data]
                 # The NetworkFabric will route this to the correct device
                 comm_packet = {
@@ -178,6 +219,7 @@ reactor AGX(device_index = 0) {
 
         if self.current_task_index >= len(self.task_queue):
             print(f"AGX: finish executing all scheduled tasks")
+            trace_output.set(self.trace_events)
         else:
             task = self.task_queue[self.current_task_index]
             task_name = task.name

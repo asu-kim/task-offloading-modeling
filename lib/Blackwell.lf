@@ -4,12 +4,14 @@ preamble {=
     time_unit = 1
 =}
 
-reactor Blackwell(device_index = 1) {
+reactor Blackwell(device_index = 1, device_name = "Blackwell") {
     // state execution_time = [3, 5]
     state task_queue = []
     state tasks = []
     state current_task_index = 0
     state comm_map // Communication map: {task_index: {child_index: {destination_device, child_task, output_size}}}
+    state trace_events = []
+    state current_comp_start_time = 0.0
     input tasks_to_run
     input communication_map
     input in_port
@@ -24,8 +26,9 @@ reactor Blackwell(device_index = 1) {
     state input_data
     state output_data
     output final_output
+    output trace_output
 
-    reaction(tasks_to_run, communication_map) -> start_execution {=
+    reaction(tasks_to_run, communication_map) -> start_execution, trace_output {=
         self.input_data = {"I1": False, "I2": False, "L1": False, "L2": False}
         self.output_data = {"I1": None, "I2": None, "L1": False, "L2": False}
 
@@ -37,6 +40,10 @@ reactor Blackwell(device_index = 1) {
         print(self.task_queue)
         print(f"Blackwell communication map: {self.comm_map}")
         print("")
+
+        if len(self.task_queue) == 0:
+            trace_output.set(self.trace_events)
+            return
 
         # Schedule execution if input data is ready
         task = self.task_queue[self.current_task_index]
@@ -97,6 +104,7 @@ reactor Blackwell(device_index = 1) {
 
     reaction(start_execution) -> end_execution {=
         elapsed_logical_time = lf.time.logical_elapsed()
+        self.current_comp_start_time = elapsed_logical_time / 1e9  # logical time to seconds
         elapsed_physicl_time = lf.time.physical_elapsed()
         deadline = self.task_queue[self.current_task_index].deadline - elapsed_logical_time / SEC(1)
         deadline = 0 if deadline < 0 else deadline
@@ -117,11 +125,23 @@ reactor Blackwell(device_index = 1) {
         print(f"Logical time = {elapsed_logical_time} and physical time = {elapsed_physicl_time}")
     =}
 
-    reaction(end_execution) -> start_execution, out_port, final_output {=
+    reaction(end_execution) -> start_execution, out_port, final_output, trace_output {=
         # Get the completed task
         completed_task = self.task_queue[self.current_task_index]
         task_index = completed_task.index
-        
+        end_time_sec = lf.time.logical_elapsed() / 1e9
+
+        # Record computation segment in trace
+        self.trace_events.append({
+            "type": "comp",
+            "task_name": completed_task.name,
+            "device_index": self.device_index,
+            "device_name": self.device_name,
+            "start_time": self.current_comp_start_time,
+            "end_time": end_time_sec,
+            "deadline_met": True
+        })
+
         # Check if this task needs to send outputs to child tasks on other devices
         if task_index in self.comm_map:
             # Send outputs to each child task on different devices
@@ -130,6 +150,16 @@ reactor Blackwell(device_index = 1) {
                 child_task = comm_info["child_task"]
                 output_size = comm_info["output_size"]
                 
+                # Record communication send in trace
+                self.trace_events.append({
+                    "type": "comm_send",
+                    "task_name": completed_task.name,
+                    "from_device": self.device_index,
+                    "to_device": destination_device,
+                    "start_time": end_time_sec,
+                    "output_size": output_size
+                })
+
                 # Create a communication packet: [destination_device_index, task_data]
                 # The NetworkFabric will route this to the correct device
                 comm_packet = {
@@ -155,6 +185,7 @@ reactor Blackwell(device_index = 1) {
 
         if self.current_task_index >= len(self.task_queue):
             print(f"Blackwell: finish executing all scheduled tasks")
+            trace_output.set(self.trace_events)
         else:
             # Schedule next execution if input data is ready
             task = self.task_queue[self.current_task_index]

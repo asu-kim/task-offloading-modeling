@@ -15,6 +15,10 @@ preamble {=
     from typing import Deque, List, Dict, Tuple, Union, Set
     import pandas as pd
     from collections import deque
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
 
     logger = logging.getLogger(__name__)
 
@@ -1081,60 +1085,95 @@ reactor TaskSetSource {
     =}
 }
 
-reactor OutputVisualizer {
+reactor OutputVisualizer(bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Bandwidth.csv") {
     input r1_output
     input r2_output
     input r3_output
+    input r1_trace
+    input r2_trace
+    input r3_trace
 
-    reaction(r1_output, r2_output, r3_output) {=
-        def plot_device_schedule(system, job_assignments, filename=None):
-        # Sort devices by index descending (highest index first)
-        # This gives us: device2, device1, device0
-        devices_sorted = sorted(system.devices, key=lambda d: d.index, reverse=True)
-        num_devices = len(devices_sorted)
-        
-        # Create row mapping: each device gets two rows (comp and comm)
-        # Row order: device2_comp, device2_comm, device1_comp, device1_comm, device0_comp, device0_comm
-        # For device at position i in sorted list (descending), comp row = i*2, comm row = i*2+1
+    state received_traces = []
+    state plotted = False
+    state bandwidth = []
+    state reactor_to_csv = []
+
+    reaction(startup) {=
+        self.received_traces = []
+        self.bandwidth = []
+        self.reactor_to_csv = {0: 0, 1: 2, 2: 1}
+        # Load bandwidth matrix for computing comm durations
+        import pandas as pd
+        comm_df = pd.read_csv(self.bandwidth_csv_path, index_col=0)
+        comm_df.columns = comm_df.columns.str.strip()
+        comm_df.index = comm_df.index.str.strip()
+        csv_names = list(comm_df.columns)
+        n = len(csv_names)
+        self.bandwidth = [[0] * n for _ in range(n)]
+        for i in range(n):
+            for j in range(n):
+                v = comm_df.iloc[i, j]
+                self.bandwidth[i][j] = int(v) if not pd.isna(v) else 0
+    =}
+
+    reaction(r1_trace, r2_trace, r3_trace) {=
+        if r1_trace.is_present and not any(t[0] == 0 for t in self.received_traces):
+            self.received_traces.append((0, r1_trace.value))
+        if r2_trace.is_present and not any(t[0] == 2 for t in self.received_traces):
+            self.received_traces.append((2, r2_trace.value))
+        if r3_trace.is_present and not any(t[0] == 1 for t in self.received_traces):
+            self.received_traces.append((1, r3_trace.value))
+
+        if len(self.received_traces) != 3 or self.plotted:
+            return
+
+        self.plotted = True
+        trace_by_device = {dev_id: trace for dev_id, trace in self.received_traces}
+        all_events = (trace_by_device.get(0, []) + trace_by_device.get(1, []) + trace_by_device.get(2, []))
+
+        comp_events = [e for e in all_events if e.get("type") == "comp"]
+        comm_events = [e for e in all_events if e.get("type") == "comm_send"]
+
+        device_index_to_name = {}
+        for e in comp_events:
+            device_index_to_name[e["device_index"]] = e["device_name"]
+        device_indices_sorted = sorted(device_index_to_name.keys(), reverse=True)
+        num_devices = len(device_indices_sorted)
+
         device_index_to_comp_row = {}
         device_index_to_comm_row = {}
         row_labels = []
-        
-        for i, dev in enumerate(devices_sorted):
+        for i, dev_idx in enumerate(device_indices_sorted):
             comp_row = i * 2
             comm_row = i * 2 + 1
-            device_index_to_comp_row[dev.index] = comp_row
-            device_index_to_comm_row[dev.index] = comm_row
-            row_labels.append(f"{dev.name}_comp")
-            row_labels.append(f"{dev.name}_comm")
+            device_index_to_comp_row[dev_idx] = comp_row
+            device_index_to_comm_row[dev_idx] = comm_row
+            name = device_index_to_name[dev_idx]
+            row_labels.append(f"{name}_comp")
+            row_labels.append(f"{name}_comm")
 
-        # ---- Build a deterministic color map per task name ----
-        tasks = sorted({a["task_name"] for a in job_assignments})
-        cmap = get_cmap("tab10")  # any qualitative colormap works (tab20, Set3, etc.)
+        tasks = sorted({e["task_name"] for e in comp_events})
+        if not tasks:
+            return
+        cmap = plt.get_cmap("tab10")
         task_colors = {task: cmap(i % cmap.N) for i, task in enumerate(tasks)}
 
-        # Adjust figure height based on number of rows (2 rows per device)
         fig_height = max(4, num_devices * 1.5)
         fig, ax = plt.subplots(figsize=(12, fig_height))
         bar_height = 0.6
 
-        # Plot computation bars
-        for a in job_assignments:
-            row = device_index_to_comp_row[a["device"].index]
-            start = a["start_time"]
-            dur = a["completion_time"] - a["start_time"]
-            task = a["task_name"]
-
-            color = task_colors[task]  # <- color for this task type
-
+        for e in comp_events:
+            row = device_index_to_comp_row[e["device_index"]]
+            start = e["start_time"]
+            dur = e["end_time"] - e["start_time"]
+            task = e["task_name"]
+            color = task_colors.get(task, "gray")
+            status = "OK" if e.get("deadline_met", True) else "MISSED"
             ax.broken_barh(
                 [(start, dur)],
                 (row - bar_height/2, bar_height),
                 facecolors=color
             )
-
-            # Annotate inside bar
-            status = "OK" if a.get("deadline_met", True) else "MISSED"
             ax.text(
                 start + dur/2, row,
                 f"{task} ({status})",
@@ -1142,58 +1181,45 @@ reactor OutputVisualizer {
                 fontsize=8, color="white", clip_on=True
             )
 
-            # Optional: mark deadlines with dashed vertical lines (only on comp rows)
-            if a.get("deadline") is not None:
-                ax.vlines([a["deadline"]], row - bar_height/2, row + bar_height/2,
-                        linestyles="dashed", alpha=0.6)
+        for e in comm_events:
+            from_dev = e["from_device"]
+            to_dev = e["to_device"]
+            row = device_index_to_comm_row[from_dev]
+            start = e["start_time"]
+            output_size = e.get("output_size", 0)
+            csv_from = self.reactor_to_csv.get(from_dev, from_dev)
+            csv_to = self.reactor_to_csv.get(to_dev, to_dev)
+            bw = self.bandwidth[csv_from][csv_to] if self.bandwidth else 0
+            dur = (output_size / bw) if bw > 0 else 0
+            task = e["task_name"]
+            color = task_colors.get(task, "gray")
+            ax.broken_barh(
+                [(start, dur)],
+                (row - bar_height/2, bar_height),
+                facecolors=color,
+                alpha=0.7
+            )
+            ax.text(
+                start + dur/2, row,
+                f"{task} (comm)",
+                ha="center", va="center",
+                fontsize=8, color="white", clip_on=True
+            )
 
-        # Plot communication bars from comm_queue
-        for device in devices_sorted:
-            comm_row = device_index_to_comm_row[device.index]
-            
-            for comm_entry in device.comm_queue:
-                task_name, comm_start, comm_end = comm_entry
-                comm_dur = comm_end - comm_start
-                
-                # Get color for this task
-                color = task_colors.get(task_name, "gray")
-                
-                ax.broken_barh(
-                    [(comm_start, comm_dur)],
-                    (comm_row - bar_height/2, bar_height),
-                    facecolors=color,
-                    alpha=0.7  # Slightly transparent to distinguish from computation
-                )
-                
-                # Annotate communication bar
-                ax.text(
-                    comm_start + comm_dur/2, comm_row,
-                    f"{task_name} (comm)",
-                    ha="center", va="center",
-                    fontsize=8, color="white", clip_on=True
-                )
-
-        # ---- Y-axis labeling ----
         ax.set_yticks(range(len(row_labels)))
         ax.set_yticklabels(row_labels)
-
-        ax.set_xlabel("Time")
-        ax.set_title("Device Scheduling (colored by task)")
+        ax.set_xlabel("Time (s)")
+        ax.set_title("Device Scheduling (from runtime trace)")
         ax.grid(axis="x", linestyle="--", alpha=0.4)
-
-        # Legend from task_colors
         handles = [
             Line2D([0], [0], color=task_colors[t], lw=8, label=t)
             for t in tasks
         ]
         ax.legend(handles=handles, title="Task types")
-
         plt.tight_layout()
-        if filename:
-            plt.savefig(filename, dpi=150)
-        plt.show()
-
-        return fig, ax
+        out_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/schedule_trace.png"
+        plt.savefig(out_path, dpi=150)
+        plt.close(fig)
     =}
 }
 
@@ -1367,6 +1393,9 @@ main reactor {
     n.out_port2 -> r_3.in_port after 3 ms
 
     r_1.final_output, r_2.final_output, r_3.final_output -> o.r1_output, o.r2_output, o.r3_output
+    r_1.trace_output -> o.r1_trace
+    r_2.trace_output -> o.r2_trace
+    r_3.trace_output -> o.r3_trace
 
     // r_1.send_a6000 -> r_2.recv_agx after 5 msec
     // r_1.send_blackwell -> r_3.recv_agx after 2 msec
