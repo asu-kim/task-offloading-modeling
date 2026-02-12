@@ -1,6 +1,7 @@
 target Python
 preamble {=
     import time
+    time_unit = 1
 =}
 
 reactor Blackwell(device_index = 1) {
@@ -22,9 +23,10 @@ reactor Blackwell(device_index = 1) {
 
     state input_data
     state output_data
+    output final_output
 
     reaction(tasks_to_run, communication_map) -> start_execution {=
-        self.input_data = {"I1": True, "I2": True, "L1": False, "L2": False}
+        self.input_data = {"I1": False, "I2": False, "L1": False, "L2": False}
         self.output_data = {"I1": None, "I2": None, "L1": False, "L2": False}
 
         # Receive the tasks to run and communication map
@@ -96,22 +98,26 @@ reactor Blackwell(device_index = 1) {
     reaction(start_execution) -> end_execution {=
         elapsed_logical_time = lf.time.logical_elapsed()
         elapsed_physicl_time = lf.time.physical_elapsed()
+        deadline = self.task_queue[self.current_task_index].deadline - elapsed_logical_time / SEC(1)
+        deadline = 0 if deadline < 0 else deadline
+        self.update_deadline(SEC(deadline))
 
         task = self.task_queue[self.current_task_index]
         print(f"Execute task {task.name}")
         print(f"Tag = ({elapsed_logical_time}, {lf.tag().microstep}) and physical time = {elapsed_physicl_time}")
         exec_time = task.execution_times[self.device_index]
-        time.sleep(exec_time/1000)
+        time.sleep(exec_time/time_unit)
         self.check_deadline()
-        end_execution.schedule(MSEC(exec_time))
-    =} deadline(forever) {=
-        print("In deadline handler.")
+        end_execution.schedule(SEC(exec_time))
+        self.update_deadline(FOREVER)
+    =} deadline(10 sec) {=
+        print("In Blackwell's deadline handler.")
         elapsed_logical_time = lf.time.logical_elapsed()
         elapsed_physicl_time = lf.time.physical_elapsed()
         print(f"Logical time = {elapsed_logical_time} and physical time = {elapsed_physicl_time}")
     =}
 
-    reaction(end_execution) -> start_execution, out_port {=
+    reaction(end_execution) -> start_execution, out_port, final_output {=
         # Get the completed task
         completed_task = self.task_queue[self.current_task_index]
         task_index = completed_task.index
@@ -137,6 +143,13 @@ reactor Blackwell(device_index = 1) {
                       f"Sending output to child task {child_task.name} (index {child_index}) "
                       f"on device {destination_device}")
                 out_port.set(comm_packet)
+
+        # Mark input data ready for any child tasks that are in this device's task_queue
+        if completed_task.child_task_indexes:
+            for child_task_index in completed_task.child_task_indexes:
+                for queued_task in self.task_queue:
+                    if child_task_index == queued_task.index:
+                        self.input_data[queued_task.name] = True
         
         self.current_task_index += 1
 
