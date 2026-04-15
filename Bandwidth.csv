@@ -1,4 +1,4 @@
 ,AGX, A6000, Blackwell
-AGX, 0, 4, 2
-A6000, 4, 0, 3
-Blackwell, 2, 3, 0
+AGX, 0, 30, 20
+A6000, 30, 0, 25
+Blackwell, 20, 25, 0

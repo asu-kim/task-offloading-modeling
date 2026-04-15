@@ -1,8 +1,8 @@
 target Python
 
-import AGX from "../lib/AGX.lf"
-import A6000 from "../lib/A6000.lf"
-import Blackwell from "../lib/Blackwell.lf"
+import MobileRobot from "../lib/MobileRobot.lf"
+import Edge from "../lib/Edge.lf"
+import Cloudlet from "../lib/Cloudlet.lf"
 
 preamble {=
     import sys
@@ -18,16 +18,23 @@ preamble {=
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.ticker as mticker
     from matplotlib.lines import Line2D
 
     logger = logging.getLogger(__name__)
+
+    def transfer_time_ms(data_size_mb: float, bandwidth_mb_per_sec: int) -> int:
+        """Transfer duration used by scheduler model (same convention as inference-offloading-scheduler)."""
+        if data_size_mb == 0 or bandwidth_mb_per_sec == 0:
+            return 0
+        return int(math.ceil(float(data_size_mb) / float(bandwidth_mb_per_sec)))
 
     @dataclass
     class Task:
         name: str = ""
         index: int = 0
         deadline: int = -1
-        execution_times: List[int] = field(default_factory=list)
+        execution_times: List[int] = field(default_factory=list)  # ms per device type (MobileRobot, Cloudlet, Edge)
         child_task_indexes: List[int] = field(default_factory=list, repr=False)
         parent_task_indexes: List[int] = field(default_factory=list, repr=False)  # Reverse relationship
 
@@ -132,11 +139,20 @@ preamble {=
             index = 0
             # Initialize Task list
             for _, row in df.iterrows():
+                name = str(row.iloc[0]).strip()
+                if not name or name.lower() == "nan":
+                    continue
+                deadline_ms = int(float(row.iloc[1]))
+                et_a_ms = int(float(row.iloc[2]))
+                et_b_ms = int(float(row.iloc[3]))
+                et_c_ms = int(float(row.iloc[4]))
+                # Internal device index order: 0 AGX, 1 A6000, 2 Blackwell
+                execution_times_ms = [et_a_ms, et_b_ms, et_c_ms]
                 task = Task(
-                    name=row.iloc[0],
+                    name=name,
                     index=index,
-                    deadline = row.iloc[1],
-                    execution_times=[int(row.iloc[2]), int(row.iloc[3]), int(row.iloc[4])],
+                    deadline=deadline_ms,
+                    execution_times=execution_times_ms,
                     input_size=int(row.iloc[5]),
                     output_size=int(row.iloc[6]),
                     source_device_index=0  # Will be set later for source tasks
@@ -176,21 +192,19 @@ preamble {=
                             self.tasks[i].child_task_indexes.append(j)
             
             # Randomly assign source tasks (tasks with no parents) to AGX devices
-            # Find all AGX device indices
             agx_device_indices = [i for i, device in enumerate(self.devices) if device.name == "AGX"]
             
             if len(agx_device_indices) == 0:
-                sys.exit("Error: No AGX devices found in system")
+                sys.exit("Error: No AGX device found in system")
             
             # Find all source tasks (tasks with no parents)
             source_tasks = [task for task in self.tasks if len(task.parent_task_indexes) == 0]
             
             # Randomly assign each source task to an AGX device
             for task in source_tasks:
-                # Randomly select one of the AGX devices
-                selected_agx_index = random.choice(agx_device_indices)
-                task.source_device_index = selected_agx_index
-                logger.debug(f"Assigned source task {task.name} to AGX device {selected_agx_index} ({self.devices[selected_agx_index].name})")
+                selected_index = random.choice(agx_device_indices)
+                task.source_device_index = selected_index
+                logger.debug(f"Assigned source task {task.name} to device {selected_index} ({self.devices[selected_index].name})")
             
             # Set period to the largest deadline from tasks
             # This ensures period is always set to the maximum deadline
@@ -269,7 +283,7 @@ preamble {=
                     # Same device (shouldn't happen here, but handle gracefully)
                     transfer_time = 0
                 else:
-                    transfer_time = math.ceil(data_size / bandwidth)
+                    transfer_time = transfer_time_ms(data_size, bandwidth)
                 
                 comm_end_time = transfer_start_time + transfer_time
                 logger.debug(f"comm_end_time = {comm_end_time}")
@@ -299,7 +313,7 @@ preamble {=
                     # Invalid bandwidth
                     return sys.maxsize
                 else:
-                    transfer_time = math.ceil(data_size / bandwidth)
+                    transfer_time = transfer_time_ms(data_size, bandwidth)
                 
                 comm_end_time = transfer_start_time + transfer_time
         
@@ -727,7 +741,7 @@ preamble {=
                     elif bandwidth == 0:
                         sys.exit(f"Error: Bandwidth between {parent_device.name} and {device.name} is 0")
                     else:
-                        transfer_time = math.ceil(data_size / bandwidth)
+                        transfer_time = transfer_time_ms(data_size, bandwidth)
                     
                     transfer_end_time = transfer_start_time + transfer_time
                     
@@ -790,7 +804,7 @@ preamble {=
                     elif bandwidth == 0:
                         sys.exit(f"Error: Bandwidth between {source_device.name} and {device.name} is 0")
                     else:
-                        transfer_time = math.ceil(data_size / bandwidth)
+                        transfer_time = transfer_time_ms(data_size, bandwidth)
                     
                     transfer_end_time = transfer_start_time + transfer_time
                     
@@ -828,7 +842,7 @@ preamble {=
                 last_job_completion_time = current_time
             
             task.computation_start_time = max(last_job_completion_time, task.communication_end_time)
-            # Map device name to execution time index (0=AGX, 1=A6000, 2=Blackwell) since tasks only have 3 execution times
+            # Map device name to execution time index (0=AGX, 1=A6000, 2=Blackwell)
             device_name_to_index = {"AGX": 0, "A6000": 1, "Blackwell": 2}
             device_type_index = device_name_to_index.get(device.name)
             if device_type_index is None:
@@ -972,11 +986,11 @@ reactor Scheduler {
     input change
     input tasks
 
-    state AGX = [0, [], [], []] # index, task_queue, send_queue, recv_queue
-    state A6000 = [2, [], [], []]
-    state Blackwell = [1, [], [], []]
-    // state tasks = [[0, 6, [4, 3, 2], 4, 4], [1, 10, [8, 5, 4], 4, 1]] # [index, deadline, [exec_time on AGX, exec_time on Blackwell, exec_time on A6000], input_size, output_size]
-    // state bandwidth = [[0, 2, 5], [2, 0, 3], [5, 3, 0]] #[[AGX to AGX, AGX to Blackwell, AGX to A6000], [Blackwell to AGX, Blackwell to Blackwell, Blackwell to A6000], [A6000 to AGX, A6000 to Blackwell, A6000 to A6000]]
+    state dev_mobile = [0, [], [], []]  # MobileRobot device_index 0
+    state dev_edge = [2, [], [], []]    # Edge device_index 2
+    state dev_cloud = [1, [], [], []]  # Cloudlet device_index 1
+    // state tasks = [[0, 6, [4, 3, 2], 4, 4], [1, 10, [8, 5, 4], 4, 1]] # [index, deadline, [exec_time on MobileRobot, Cloudlet, Edge], input_size, output_size]
+    // state bandwidth = [[0, 2, 5], [2, 0, 3], [5, 3, 0]] # link rates (MB/s) between devices
     output[3] tasks_to_run
     output[3] communication_map
 
@@ -1101,7 +1115,7 @@ reactor OutputVisualizer(bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/tas
     reaction(startup) {=
         self.received_traces = []
         self.bandwidth = []
-        self.reactor_to_csv = {0: 0, 1: 2, 2: 1}
+        self.reactor_to_csv = {0: 0, 1: 1, 2: 2}
         # Load bandwidth matrix for computing comm durations
         import pandas as pd
         comm_df = pd.read_csv(self.bandwidth_csv_path, index_col=0)
@@ -1119,10 +1133,10 @@ reactor OutputVisualizer(bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/tas
     reaction(r1_trace, r2_trace, r3_trace) {=
         if r1_trace.is_present and not any(t[0] == 0 for t in self.received_traces):
             self.received_traces.append((0, r1_trace.value))
-        if r2_trace.is_present and not any(t[0] == 2 for t in self.received_traces):
-            self.received_traces.append((2, r2_trace.value))
-        if r3_trace.is_present and not any(t[0] == 1 for t in self.received_traces):
-            self.received_traces.append((1, r3_trace.value))
+        if r2_trace.is_present and not any(t[0] == 1 for t in self.received_traces):
+            self.received_traces.append((1, r2_trace.value))
+        if r3_trace.is_present and not any(t[0] == 2 for t in self.received_traces):
+            self.received_traces.append((2, r3_trace.value))
 
         if len(self.received_traces) != 3 or self.plotted:
             return
@@ -1134,23 +1148,27 @@ reactor OutputVisualizer(bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/tas
         comp_events = [e for e in all_events if e.get("type") == "comp"]
         comm_events = [e for e in all_events if e.get("type") == "comm_send"]
 
-        device_index_to_name = {}
+        # Always show all three devices (indices 0,1,2). HE may assign no work to one of them;
+        # previously we only listed devices with comp events, which hid idle devices like Cloudlet.
+        device_index_to_name = {0: "MobileRobot", 1: "Cloudlet", 2: "Edge"}
         for e in comp_events:
             device_index_to_name[e["device_index"]] = e["device_name"]
-        device_indices_sorted = sorted(device_index_to_name.keys(), reverse=True)
-        num_devices = len(device_indices_sorted)
+        # Desired visual order (top -> bottom): MobileRobot, Edge, Cloudlet.
+        desired_top_to_bottom = [0, 1, 2]
+        display_bottom_to_top = list(reversed(desired_top_to_bottom))
+        num_devices = len(display_bottom_to_top)
 
         device_index_to_comp_row = {}
         device_index_to_comm_row = {}
-        row_labels = []
-        for i, dev_idx in enumerate(device_indices_sorted):
-            comp_row = i * 2
-            comm_row = i * 2 + 1
+        row_labels = [""] * (2 * num_devices)
+        for i, dev_idx in enumerate(display_bottom_to_top):
+            comm_row = i * 2
+            comp_row = i * 2 + 1
             device_index_to_comp_row[dev_idx] = comp_row
             device_index_to_comm_row[dev_idx] = comm_row
             name = device_index_to_name[dev_idx]
-            row_labels.append(f"{name}_comp")
-            row_labels.append(f"{name}_comm")
+            row_labels[comp_row] = f"{name}_comp"
+            row_labels[comm_row] = f"{name}_comm"
 
         tasks = sorted({e["task_name"] for e in comp_events})
         if not tasks:
@@ -1158,24 +1176,35 @@ reactor OutputVisualizer(bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/tas
         cmap = plt.get_cmap("tab10")
         task_colors = {task: cmap(i % cmap.N) for i, task in enumerate(tasks)}
 
+        def to_ms(sec):
+            return float(sec) * 1000.0
+
         fig_height = max(4, num_devices * 1.5)
         fig, ax = plt.subplots(figsize=(12, fig_height))
         bar_height = 0.6
+        xmax_ms = 100.0
 
         for e in comp_events:
             row = device_index_to_comp_row[e["device_index"]]
-            start = e["start_time"]
-            dur = e["end_time"] - e["start_time"]
+            start_ms = to_ms(e["start_time"])
+            dur_ms = to_ms(e["end_time"] - e["start_time"])
+            end_ms = to_ms(e["end_time"])
             task = e["task_name"]
             color = task_colors.get(task, "gray")
-            status = "OK" if e.get("deadline_met", True) else "MISSED"
+            deadline_ms = e.get("deadline_ms", -1)
+            if deadline_ms is not None and int(deadline_ms) > 0:
+                status = "OK" if end_ms <= float(deadline_ms) else "MISSED"
+                xmax_ms = max(xmax_ms, end_ms + 50.0, float(deadline_ms) + 50.0)
+            else:
+                status = "OK" if e.get("deadline_met", True) else "MISSED"
+                xmax_ms = max(xmax_ms, end_ms + 50.0)
             ax.broken_barh(
-                [(start, dur)],
+                [(start_ms, dur_ms)],
                 (row - bar_height/2, bar_height),
                 facecolors=color
             )
             ax.text(
-                start + dur/2, row,
+                start_ms + dur_ms/2, row,
                 f"{task} ({status})",
                 ha="center", va="center",
                 fontsize=8, color="white", clip_on=True
@@ -1184,37 +1213,59 @@ reactor OutputVisualizer(bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/tas
         for e in comm_events:
             from_dev = e["from_device"]
             to_dev = e["to_device"]
-            row = device_index_to_comm_row[from_dev]
-            start = e["start_time"]
+            start_ms = to_ms(e["start_time"])
             output_size = e.get("output_size", 0)
             csv_from = self.reactor_to_csv.get(from_dev, from_dev)
             csv_to = self.reactor_to_csv.get(to_dev, to_dev)
             bw = self.bandwidth[csv_from][csv_to] if self.bandwidth else 0
-            dur = (output_size / bw) if bw > 0 else 0
+            dur_ms = float(transfer_time_ms(output_size, bw)) if bw > 0 else 0.0
             task = e["task_name"]
             color = task_colors.get(task, "gray")
-            ax.broken_barh(
-                [(start, dur)],
-                (row - bar_height/2, bar_height),
-                facecolors=color,
-                alpha=0.7
-            )
-            ax.text(
-                start + dur/2, row,
-                f"{task} (comm)",
-                ha="center", va="center",
-                fontsize=8, color="white", clip_on=True
-            )
+            xmax_ms = max(xmax_ms, start_ms + dur_ms + 50.0)
+
+            # Draw communication on both sender and receiver comm lanes.
+            comm_rows = [device_index_to_comm_row[from_dev], device_index_to_comm_row[to_dev]]
+            for row in comm_rows:
+                ax.broken_barh(
+                    [(start_ms, dur_ms)],
+                    (row - bar_height/2, bar_height),
+                    facecolors=color,
+                    alpha=0.7
+                )
+                ax.text(
+                    start_ms + dur_ms/2, row,
+                    f"{task} (comm)",
+                    ha="center", va="center",
+                    fontsize=8, color="white", clip_on=True
+                )
+
+        # Vertical deadline markers (ms), one line per distinct deadline
+        drawn_deadlines = set()
+        for e in comp_events:
+            dm = e.get("deadline_ms", -1)
+            if dm is None or int(dm) <= 0:
+                continue
+            dm_f = float(dm)
+            if dm_f in drawn_deadlines:
+                continue
+            drawn_deadlines.add(dm_f)
+            ax.axvline(dm_f, color="0.35", linestyle="--", linewidth=1.2, alpha=0.85, zorder=0)
+
+        xmax_ms = max(xmax_ms, 100.0)
+        xmax_ms = float(int(math.ceil(xmax_ms / 100.0)) * 100)
+        ax.set_xlim(0.0, xmax_ms)
+        ax.xaxis.set_major_locator(mticker.MultipleLocator(100))
 
         ax.set_yticks(range(len(row_labels)))
         ax.set_yticklabels(row_labels)
-        ax.set_xlabel("Time (s)")
+        ax.set_xlabel("Time (ms)")
         ax.set_title("Device Scheduling (from runtime trace)")
         ax.grid(axis="x", linestyle="--", alpha=0.4)
         handles = [
             Line2D([0], [0], color=task_colors[t], lw=8, label=t)
             for t in tasks
         ]
+        handles.append(Line2D([0], [0], color="0.35", linestyle="--", lw=1.5, label="Deadline"))
         ax.legend(handles=handles, title="Task types")
         plt.tight_layout()
         out_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/schedule_trace.png"
@@ -1240,14 +1291,16 @@ reactor NetworkFabric {
     state num_devices = 3
     state bandwidth
     state devices
-    state pending_packet  # Store packet temporarily for routing
+    state pending_packets  # Per-destination queues of (ready_time_ns, packet)
+    state sender_available_ns  # Per-sender next-available logical time (ns)
 
     reaction(startup) {=
         bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Bandwidth.csv"
 
         self.devices = [Device() for _ in range(self.num_devices)]
         self.bandwidth = [[0] * self.num_devices for _ in range(self.num_devices)]
-        self.pending_packet = None
+        self.pending_packets = [[], [], []]
+        self.sender_available_ns = [0, 0, 0]
 
         # Load bandwidths from CSV
         # Read with pandas and strip whitespace from column names
@@ -1302,72 +1355,117 @@ reactor NetworkFabric {
     =}
 
     reaction(in_port0, in_port1, in_port2) -> out_port0_trigger, out_port1_trigger, out_port2_trigger{=
-        # Determine which input port received the message and route to appropriate output
-        packet = None
-        source_port = None
-        
+        incoming_packets = []
         if in_port0.is_present:
-            packet = in_port0.value
-            source_port = 0
-        elif in_port1.is_present:
-            packet = in_port1.value
-            source_port = 1
-        elif in_port2.is_present:
-            packet = in_port2.value
-            source_port = 2
-        
-        if packet is None:
+            incoming_packets.append((0, in_port0.value))
+        if in_port1.is_present:
+            incoming_packets.append((1, in_port1.value))
+        if in_port2.is_present:
+            incoming_packets.append((2, in_port2.value))
+
+        if len(incoming_packets) == 0:
             return
-        
-        # Store packet in state for output reactions
-        self.pending_packet = packet
-        
-        # Extract destination device from packet
-        if isinstance(packet, dict) and "destination_device" in packet:
-            destination_device = packet["destination_device"]
-            
-            # Route to the appropriate output port based on destination device index
-            # Device 0 = AGX (out_port0), Device 1 = A6000 (out_port1), Device 2 = Blackwell (out_port2)
-            if destination_device == 0:
-                print(f"NetworkFabric: Routing packet from device {source_port} to device 0 (AGX)")
-                out_port0_trigger.schedule(0)
-            elif destination_device == 1:
-                print(f"NetworkFabric: Routing packet from device {source_port} to device 1 (A6000)")
-                out_port1_trigger.schedule(0)
-            elif destination_device == 2:
-                print(f"NetworkFabric: Routing packet from device {source_port} to device 2 (Blackwell)")
-                out_port2_trigger.schedule(0)
+
+        for source_port, packet in incoming_packets:
+            if isinstance(packet, dict) and "destination_device" in packet:
+                destination_device = packet["destination_device"]
+
+                # Compute communication completion delay based on payload and bandwidth.
+                payload_size = packet.get("input_size", packet.get("output_size", 0))
+                bw = self.bandwidth[source_port][destination_device]
+                transfer_delay_ms = transfer_time_ms(payload_size, bw) if bw > 0 else 0
+                now_ns = int(lf.time.logical_elapsed())
+
+                # Sequential sender-channel model:
+                # a sender can start the next transfer only after its current one finishes.
+                transfer_start_ns = max(now_ns, int(self.sender_available_ns[source_port]))
+                ready_time_ns = transfer_start_ns + int(transfer_delay_ms) * 1000000
+                self.sender_available_ns[source_port] = ready_time_ns
+
+                schedule_wait_ms = int(math.ceil((ready_time_ns - now_ns) / 1000000.0))
+
+                if destination_device == 0:
+                    print(f"NetworkFabric: Routing packet from device {source_port} to device 0 (MobileRobot)")
+                    self.pending_packets[0].append((ready_time_ns, packet))
+                    self.pending_packets[0].sort(key=lambda x: x[0])
+                    out_port0_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+                elif destination_device == 1:
+                    print(f"NetworkFabric: Routing packet from device {source_port} to device 1 (Cloudlet)")
+                    self.pending_packets[1].append((ready_time_ns, packet))
+                    self.pending_packets[1].sort(key=lambda x: x[0])
+                    out_port1_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+                elif destination_device == 2:
+                    print(f"NetworkFabric: Routing packet from device {source_port} to device 2 (Edge)")
+                    self.pending_packets[2].append((ready_time_ns, packet))
+                    self.pending_packets[2].sort(key=lambda x: x[0])
+                    out_port2_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+                else:
+                    print(f"NetworkFabric: Error - Invalid destination device {destination_device}")
             else:
-                print(f"NetworkFabric: Error - Invalid destination device {destination_device}")
-        else:
-            print(f"NetworkFabric: Error - Invalid packet format")
+                print(f"NetworkFabric: Error - Invalid packet format")
     =}
 
-    reaction(out_port0_trigger) -> out_port0 {=
-        # Forward the stored packet
-        if self.pending_packet is not None:
-            out_port0.set(self.pending_packet)
-            self.pending_packet = None
+    reaction(out_port0_trigger) -> out_port0, out_port0_trigger {=
+        if len(self.pending_packets[0]) == 0:
+            return
+
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[0].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[0][0]
+        if next_ready_ns > current_ns:
+            wait_ms = int(math.ceil((next_ready_ns - current_ns) / 1000000.0))
+            out_port0_trigger.schedule(MSEC(max(wait_ms, 1)))
+            return
+
+        _, packet = self.pending_packets[0].pop(0)
+        out_port0.set(packet)
+        if len(self.pending_packets[0]) > 0:
+            next_wait_ms = int(math.ceil((self.pending_packets[0][0][0] - current_ns) / 1000000.0))
+            out_port0_trigger.schedule(MSEC(max(next_wait_ms, 0)))
     =}
-    reaction(out_port1_trigger) -> out_port1 {=
-        # Forward the stored packet
-        if self.pending_packet is not None:
-            out_port1.set(self.pending_packet)
-            self.pending_packet = None
+    reaction(out_port1_trigger) -> out_port1, out_port1_trigger {=
+        if len(self.pending_packets[1]) == 0:
+            return
+
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[1].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[1][0]
+        if next_ready_ns > current_ns:
+            wait_ms = int(math.ceil((next_ready_ns - current_ns) / 1000000.0))
+            out_port1_trigger.schedule(MSEC(max(wait_ms, 1)))
+            return
+
+        _, packet = self.pending_packets[1].pop(0)
+        out_port1.set(packet)
+        if len(self.pending_packets[1]) > 0:
+            next_wait_ms = int(math.ceil((self.pending_packets[1][0][0] - current_ns) / 1000000.0))
+            out_port1_trigger.schedule(MSEC(max(next_wait_ms, 0)))
     =}
-    reaction(out_port2_trigger) -> out_port2 {=
-        # Forward the stored packet
-        if self.pending_packet is not None:
-            out_port2.set(self.pending_packet)
-            self.pending_packet = None
+    reaction(out_port2_trigger) -> out_port2, out_port2_trigger {=
+        if len(self.pending_packets[2]) == 0:
+            return
+
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[2].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[2][0]
+        if next_ready_ns > current_ns:
+            wait_ms = int(math.ceil((next_ready_ns - current_ns) / 1000000.0))
+            out_port2_trigger.schedule(MSEC(max(wait_ms, 1)))
+            return
+
+        _, packet = self.pending_packets[2].pop(0)
+        out_port2.set(packet)
+        if len(self.pending_packets[2]) > 0:
+            next_wait_ms = int(math.ceil((self.pending_packets[2][0][0] - current_ns) / 1000000.0))
+            out_port2_trigger.schedule(MSEC(max(next_wait_ms, 0)))
     =}
 }
 
 main reactor {
     s = new Scheduler()
-    r_1 = new AGX()
-    r_2 = new A6000()
-    r_3 = new Blackwell()
+    r_1 = new MobileRobot()
+    r_2 = new Edge()
+    r_3 = new Cloudlet()
     // v = new Visulizer()
     // sr = new SchedulingResult()
     n = new NetworkFabric()
@@ -1380,7 +1478,7 @@ main reactor {
 
     // v.csv_path -> s.csv_path
     s.tasks_to_run -> r_1.tasks_to_run, r_2.tasks_to_run, r_3.tasks_to_run
-    s.communication_map -> r_1.communication_map, r_3.communication_map, r_2.communication_map
+    s.communication_map -> r_1.communication_map, r_2.communication_map, r_3.communication_map
     // s.tasks_to_run -> sr.tasks_to_run
 
     r_1.out_port -> n.in_port0 after 1 ms
