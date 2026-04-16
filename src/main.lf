@@ -465,14 +465,81 @@ preamble {=
 
         return mappings
 
+    def compute_level(task: Task, system: System) -> int:
+        """Compute Hu level: longest path length from this task to any leaf."""
+        if len(task.child_task_indexes) == 0:
+            return 0
+
+        max_child_level = 0
+        for child_index in task.child_task_indexes:
+            child_task = system.tasks[child_index]
+            child_level = compute_level(child_task, system)
+            max_child_level = max(max_child_level, child_level)
+
+        return 1 + max_child_level
+
+    def hu_scheduler(system: System, event_q: Deque[Task], current_time: int = 0):
+        """Hu level scheduler.
+
+        Priority is Hu level (higher first), then earliest deadline.
+        Device assignment picks earliest finish time.
+        """
+        logger.debug(f"At time {current_time}, scheduling tasks with HU")
+
+        ready_tasks = [task for task in event_q if task.ready_time != -1 and task.ready_time <= current_time]
+        logger.debug(f"At time {current_time}, {len(ready_tasks)} ready task(s) out of {len(event_q)} total task(s)")
+
+        for task in ready_tasks:
+            level = compute_level(task, system)
+            task.priority = level
+            logger.debug(f"At time {current_time}, {task.name}'s priority (level) is {task.priority}")
+
+        mappings = []
+        if len(ready_tasks) == 0:
+            return mappings
+
+        sorted_tasks = sorted(ready_tasks, key=lambda t: (-t.priority, t.deadline if t.deadline else sys.maxsize))
+        assigned_device_indices = set()
+
+        for task in sorted_tasks:
+            best_device = None
+            best_finish_time = sys.maxsize
+
+            for device in system.devices:
+                if device.index in assigned_device_indices:
+                    continue
+
+                finish_time = compute_finish_time(task, device, system, current_time)
+                if finish_time < best_finish_time:
+                    best_finish_time = finish_time
+                    best_device = device
+
+            if best_device is not None:
+                mappings.append([task, best_device])
+                assigned_device_indices.add(best_device.index)
+                logger.debug(f"Assigned {task.name} to {best_device.name}, finish time: {best_finish_time}")
+
+                try:
+                    event_q.remove(task)
+                except ValueError:
+                    logger.debug(f"Task {task} not found in event_q when scheduling; it was likely removed earlier.")
+            else:
+                logger.debug(f"No available device found for {task.name}")
+
+        return mappings
+
     ########### Global variables ###########
     current_time = -1
     global_deadline = -1
     event_q: Deque[Task] = deque()
     # Track job assignments for final summary
     job_assignments: List[Dict] = []
+    # Scheduler selection in file (no CLI argument required).
+    # Allowed values: "HEFT", "HU"
+    scheduler_mode = "HU"
+
     # Scheduler function pointer
-    scheduler = heft_scheduler
+    scheduler = hu_scheduler if scheduler_mode == "HU" else heft_scheduler
     # Track completed parents for each child task
     # Key: child_task_index, Value: set of completed parent_task_indexes
     completed_parents: Dict[int, Set[int]] = {}
