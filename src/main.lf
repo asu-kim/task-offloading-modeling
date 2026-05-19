@@ -1,8 +1,8 @@
 target Python
 
-import MobileRobot from "../lib/MobileRobot.lf"
-import Edge from "../lib/Edge.lf"
-import Cloudlet from "../lib/Cloudlet.lf"
+import MobileRobot from "../lib/simulation/MobileRobot.lf"
+import Edge from "../lib/simulation/Edge.lf"
+import Cloudlet from "../lib/simulation/Cloudlet.lf"
 
 preamble {=
     import sys

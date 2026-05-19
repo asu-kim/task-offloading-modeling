@@ -132,7 +132,7 @@ reactor Edge(device_index = 1, device_name = "Edge") {
         print(f"Edge: Tag = ({elapsed_logical_time}, {lf.tag().microstep}) and physical time = {elapsed_physicl_time}")
         exec_time_ms = task.execution_times[self.device_index]
         time.sleep(exec_time_ms / 1000.0 / time_unit)
-        # self.check_deadline()
+        self.check_deadline()
         end_execution.schedule(MSEC(int(exec_time_ms)))
         # self.update_deadline(FOREVER)
     =} deadline(10 sec) {=
