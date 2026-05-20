@@ -29,6 +29,19 @@ preamble {=
             return 0
         return int(math.ceil(float(data_size_mb) / float(bandwidth_mb_per_sec)))
 
+    # Shared deployment-network model. All p2p communications reserve this
+    # single channel, so no two packet transfers overlap in logical time.
+    network_available_sec = 0.0
+    P2P_LINK_DELAY_MS = [
+        [0, 150, 120],
+        [150, 0, 130],
+        [120, 130, 0],
+    ]
+
+    def reset_network_serialization():
+        global network_available_sec
+        network_available_sec = 0.0
+
     @dataclass
     class Task:
         name: str = ""
@@ -1071,6 +1084,7 @@ reactor Scheduler {
                     num_devices=3)
 
         global_deadline = system.period
+        reset_network_serialization()
         job_assignments = main_loop(system, reset_state=True)
         # print(job_assignments)
         
@@ -1098,6 +1112,7 @@ reactor Scheduler {
             return {
                 "task": task,
                 "device": task_to_device[task_index],
+                "source_device": task.source_device_index,
                 "continuations": continuations
             }
 
@@ -1105,10 +1120,10 @@ reactor Scheduler {
         for task in system.tasks:
             if len(task.parent_task_indexes) == 0 and task.index in task_to_device:
                 packet = build_chain_packet(task.index)
-                initial_task_chains[packet["device"]].append(packet)
+                initial_task_chains[packet["source_device"]].append(packet)
 
         for device_index, chains in enumerate(initial_task_chains):
-            print(f"Initial deployment chains for device {device_index}: "
+            print(f"Initial deployment chains sourced at device {device_index}: "
                   f"{[packet['task'].name for packet in chains]}")
             task_chains[device_index].set(chains)
     =}
@@ -1246,11 +1261,14 @@ reactor OutputVisualizer(bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/tas
             from_dev = e["from_device"]
             to_dev = e["to_device"]
             start_ms = to_ms(e["start_time"])
-            output_size = e.get("output_size", 0)
-            csv_from = self.reactor_to_csv.get(from_dev, from_dev)
-            csv_to = self.reactor_to_csv.get(to_dev, to_dev)
-            bw = self.bandwidth[csv_from][csv_to] if self.bandwidth else 0
-            dur_ms = float(transfer_time_ms(output_size, bw)) if bw > 0 else 0.0
+            if e.get("end_time") is not None:
+                dur_ms = max(0.0, to_ms(e["end_time"] - e["start_time"]))
+            else:
+                output_size = e.get("output_size", 0)
+                csv_from = self.reactor_to_csv.get(from_dev, from_dev)
+                csv_to = self.reactor_to_csv.get(to_dev, to_dev)
+                bw = self.bandwidth[csv_from][csv_to] if self.bandwidth else 0
+                dur_ms = float(transfer_time_ms(output_size, bw)) if bw > 0 else 0.0
             task = e["task_name"]
             color = task_colors.get(task, "gray")
             xmax_ms = max(xmax_ms, start_ms + dur_ms + 50.0)
@@ -1300,7 +1318,7 @@ reactor OutputVisualizer(bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/tas
         handles.append(Line2D([0], [0], color="0.35", linestyle="--", lw=1.5, label="Deadline"))
         ax.legend(handles=handles, title="Task types")
         plt.tight_layout()
-        out_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/schedule_trace.png"
+        out_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/schedule_trace_deployment.png"
         plt.savefig(out_path, dpi=150)
         plt.close(fig)
     =}
@@ -1321,12 +1339,12 @@ main reactor {
     // v.csv_path -> s.csv_path
     s.task_chains -> r_1.task_chains, r_2.task_chains, r_3.task_chains
 
-    r_1.send_edge -> r_2.recv_mobile_robot after 5 ms
-    r_1.send_cloudlet -> r_3.recv_mobile_robot after 2 ms
-    r_2.send_mobile_robot -> r_1.recv_edge after 5 ms
-    r_2.send_cloudlet -> r_3.recv_edge after 3 ms
-    r_3.send_mobile_robot -> r_1.recv_cloudlet after 2 ms
-    r_3.send_edge -> r_2.recv_cloudlet after 3 ms
+    r_1.send_edge -> r_2.recv_mobile_robot after 150 ms
+    r_1.send_cloudlet -> r_3.recv_mobile_robot after 120 ms
+    r_2.send_mobile_robot -> r_1.recv_edge after 150 ms
+    r_2.send_cloudlet -> r_3.recv_edge after 130 ms
+    r_3.send_mobile_robot -> r_1.recv_cloudlet after 120 ms
+    r_3.send_edge -> r_2.recv_cloudlet after 130 ms
 
     r_1.final_output, r_2.final_output, r_3.final_output -> o.r1_output, o.r2_output, o.r3_output
     r_1.trace_output -> o.r1_trace

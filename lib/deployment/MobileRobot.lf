@@ -56,6 +56,58 @@ preamble {=
             task = reactor.current_packet["task"]
             print(f"{reactor.device_name}: Schedule task {task.name}")
             start_execution.schedule(0)
+
+    def _record_arrived_packet(reactor, packet):
+        if not isinstance(packet, dict):
+            return
+        sender_device = packet.get("sender_device")
+        sent_time_sec = packet.get("sent_time_sec")
+        task = packet.get("task")
+        if sender_device is None or sent_time_sec is None or task is None:
+            return
+        if sender_device == reactor.device_index:
+            return
+
+        arrival_time_sec = lf.time.logical_elapsed() / 1e9
+        reactor.trace_events.append({
+            "type": "comm_send",
+            "task_name": task.name,
+            "from_device": sender_device,
+            "to_device": reactor.device_index,
+            "start_time": sent_time_sec,
+            "end_time": arrival_time_sec,
+            "output_size": packet.get("payload_size", 0)
+        })
+
+    def _reserve_serial_network_slot(reactor, packet):
+        global network_available_sec
+        try:
+            network_available_sec
+        except NameError:
+            network_available_sec = 0.0
+
+        now_sec = lf.time.logical_elapsed() / 1e9
+        if not isinstance(packet, dict):
+            return now_sec
+
+        if packet.get("reserved_send_time_sec") is None:
+            destination_device = packet.get("device")
+            link_delay_ms = 0
+            try:
+                if destination_device is not None:
+                    link_delay_ms = P2P_LINK_DELAY_MS[reactor.device_index][destination_device]
+            except (NameError, IndexError, TypeError):
+                link_delay_ms = 0
+
+            reserved_start_sec = max(now_sec, network_available_sec)
+            reserved_end_sec = reserved_start_sec + (float(link_delay_ms) / 1000.0)
+            network_available_sec = reserved_end_sec
+            packet["reserved_send_time_sec"] = reserved_start_sec
+            packet["reserved_arrival_time_sec"] = reserved_end_sec
+            print(f"{reactor.device_name}: Reserved network for task {packet.get('task').name if packet.get('task') else 'unknown'} "
+                  f"from {reserved_start_sec * 1000.0:.1f} ms to {reserved_end_sec * 1000.0:.1f} ms")
+
+        return packet["reserved_send_time_sec"]
 =}
 
 reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
@@ -68,7 +120,6 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
     state current_comp_start_time = 0.0
     state pending_packets = []
     state bandwidth = []
-    state sender_trace_next_sec = 0.0
 
     input task_chains
     input recv_edge
@@ -91,7 +142,6 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
         self.completed_task_indexes = set()
         self.trace_events = []
         self.pending_packets = []
-        self.sender_trace_next_sec = 0.0
         self.bandwidth = _load_bandwidth_matrix()
     =}
 
@@ -103,7 +153,6 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
         self.completed_task_indexes = set()
         self.trace_events = []
         self.pending_packets = []
-        self.sender_trace_next_sec = 0.0
 
         chains = task_chains.value if task_chains.is_present and isinstance(task_chains.value, list) else []
         print(f"{self.device_name}: Received {len(chains)} initial chain packet(s).")
@@ -112,6 +161,12 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
             if isinstance(packet, dict) and packet.get("device") == self.device_index:
                 _accept_chain_packet(self, packet)
             else:
+                if isinstance(packet, dict) and "task" in packet and "device" in packet:
+                    task = packet["task"]
+                    destination_device = packet["device"]
+                    packet["payload_size"] = task.input_size
+                    print(f"{self.device_name}: Forwarding input data for task {task.name} "
+                          f"to device {destination_device}")
                 self.pending_packets.append(packet)
 
         if len(self.pending_packets) > 0:
@@ -129,6 +184,7 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
 
         for packet in packets:
             if isinstance(packet, dict) and packet.get("device") == self.device_index:
+                _record_arrived_packet(self, packet)
                 _accept_chain_packet(self, packet)
             else:
                 self.pending_packets.append(packet)
@@ -197,20 +253,7 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
                 _accept_chain_packet(self, next_packet)
                 continue
 
-            output_size = completed_task.output_size
-            bw = self.bandwidth[self.device_index][destination_device] if self.bandwidth else 0
-            transfer_ms = transfer_time_ms(output_size, bw) if bw > 0 else 0
-            trace_send_time_sec = max(self.sender_trace_next_sec, end_time_sec)
-
-            self.trace_events.append({
-                "type": "comm_send",
-                "task_name": next_packet["task"].name,
-                "from_device": self.device_index,
-                "to_device": destination_device,
-                "start_time": trace_send_time_sec,
-                "output_size": output_size
-            })
-            self.sender_trace_next_sec = trace_send_time_sec + (transfer_ms / 1000.0)
+            next_packet["payload_size"] = completed_task.output_size
             self.pending_packets.append(next_packet)
             print(f"{self.device_name}: Forwarding task {next_packet['task'].name} to device {destination_device}")
 
@@ -225,8 +268,19 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
         if len(self.pending_packets) == 0:
             return
 
+        packet = self.pending_packets[0]
+        reserved_send_time_sec = _reserve_serial_network_slot(self, packet)
+        now_sec = lf.time.logical_elapsed() / 1e9
+        if reserved_send_time_sec > now_sec:
+            wait_ms = max(1, int((reserved_send_time_sec - now_sec) * 1000.0 + 0.999999))
+            send_packet.schedule(MSEC(wait_ms))
+            return
+
         packet = self.pending_packets.pop(0)
         destination_device = packet.get("device") if isinstance(packet, dict) else None
+        if isinstance(packet, dict):
+            packet["sender_device"] = self.device_index
+            packet["sent_time_sec"] = now_sec
         if destination_device == 1:
             send_edge.set(packet)
         elif destination_device == 2:
