@@ -29,14 +29,20 @@ preamble {=
             return 0
         return int(math.ceil(float(data_size_mb) / float(bandwidth_mb_per_sec)))
 
+    def channel_delay_ms(system, source_device_index: int, target_device_index: int, data_size_mb: float):
+        if source_device_index == target_device_index:
+            return 0
+
+        bandwidth = system.bandwidth[source_device_index][target_device_index]
+        if bandwidth == 0:
+            return None
+
+        latency_ms = system.latency[source_device_index][target_device_index]
+        return int(latency_ms) + transfer_time_ms(data_size_mb, bandwidth)
+
     # Shared deployment-network model. All p2p communications reserve this
     # single channel, so no two packet transfers overlap in logical time.
     network_available_sec = 0.0
-    P2P_LINK_DELAY_MS = [
-        [0, 150, 120],
-        [150, 0, 130],
-        [120, 130, 0],
-    ]
 
     def reset_network_serialization():
         global network_available_sec
@@ -85,66 +91,66 @@ preamble {=
     class System:
         task_csv_path: str
         dependency_csv_path: str
-        bandwidth_csv_path: str
+        bandwidth_csv_path: str = ""
+        network_info: dict = None
         period: int = -1  # Will be computed from largest deadline if not provided
         num_devices: int = 3
         tasks: list[Task] = field(default_factory=list) # Nodes
         edges: List[List[int]] = field(init=False) # Edges
         devices: list[Device] = field(init=False)
         bandwidth: list[list[int]] = field(init=False)
+        latency: list[list[int]] = field(init=False)
 
         def __post_init__(self):
             self.devices = [Device() for _ in range(self.num_devices)]
             self.bandwidth = [[0] * self.num_devices for _ in range(self.num_devices)]
+            self.latency = [[0] * self.num_devices for _ in range(self.num_devices)]
 
-            # Load bandwidths from CSV
-            # Read with pandas and strip whitespace from column names
-            comm_df = pd.read_csv(self.bandwidth_csv_path, index_col=0)
-            # Strip whitespace from both column names and index names
-            comm_df.columns = comm_df.columns.str.strip()
-            comm_df.index = comm_df.index.str.strip()
-            
-            # Get device names from CSV columns
-            csv_device_names = list(comm_df.columns)
-            csv_index_names = list(comm_df.index)
-            
-            # Verify that CSV has the correct number of devices
-            if len(csv_device_names) != self.num_devices:
-                sys.exit(f"Error: Bandwidth CSV has {len(csv_device_names)} devices, but num_devices={self.num_devices}")
-            if len(csv_index_names) != self.num_devices:
-                sys.exit(f"Error: Bandwidth CSV index has {len(csv_index_names)} devices, but num_devices={self.num_devices}")
-            
-            # Verify that column names and index names match (they should for a symmetric bandwidth matrix)
-            if csv_device_names != csv_index_names:
-                sys.exit(f"Error: Bandwidth CSV column names and index names do not match. Columns: {csv_device_names}, Index: {csv_index_names}")
-            
-            # Assign device names from CSV columns (in order, preserves duplicates)
+            if self.network_info is not None:
+                csv_device_names = [str(name).strip() for name in self.network_info.get("device_names", [])]
+                bandwidth_values = self.network_info.get("bandwidth", [])
+                latency_values = self.network_info.get("latency", [])
+
+                if len(csv_device_names) != self.num_devices:
+                    sys.exit(f"Error: network_info has {len(csv_device_names)} devices, but num_devices={self.num_devices}")
+                if len(bandwidth_values) != self.num_devices or any(len(row) != self.num_devices for row in bandwidth_values):
+                    sys.exit("Error: network_info bandwidth matrix has invalid dimensions")
+                if len(latency_values) != self.num_devices or any(len(row) != self.num_devices for row in latency_values):
+                    sys.exit("Error: network_info latency matrix has invalid dimensions")
+            else:
+                # Fallback for standalone simulation runs when no environment update is provided.
+                comm_df = pd.read_csv(self.bandwidth_csv_path, index_col=0)
+                comm_df.columns = comm_df.columns.str.strip()
+                comm_df.index = comm_df.index.str.strip()
+                
+                csv_device_names = list(comm_df.columns)
+                csv_index_names = list(comm_df.index)
+                
+                if len(csv_device_names) != self.num_devices:
+                    sys.exit(f"Error: Bandwidth CSV has {len(csv_device_names)} devices, but num_devices={self.num_devices}")
+                if len(csv_index_names) != self.num_devices:
+                    sys.exit(f"Error: Bandwidth CSV index has {len(csv_index_names)} devices, but num_devices={self.num_devices}")
+                
+                if csv_device_names != csv_index_names:
+                    sys.exit(f"Error: Bandwidth CSV column names and index names do not match. Columns: {csv_device_names}, Index: {csv_index_names}")
+                
+                bandwidth_values = comm_df.values
+                latency_values = [[0] * self.num_devices for _ in range(self.num_devices)]
+
             for i, device in enumerate(self.devices):
                 device.name = csv_device_names[i]
                 device.index = i
             
-            # Populate bandwidth matrix directly from CSV
-            # Access by position using .values to avoid issues with duplicate column/index names
-            # Since CSV rows are in the same order as devices, use device index directly as row index
-            comm_values = comm_df.values  # Get numpy array
             for i, device in enumerate(self.devices):
-                device_name = device.name
-                # Verify the device name matches the CSV row (for validation)
-                csv_row_name = comm_df.index[i]
-                if csv_row_name != device_name:
-                    sys.exit(f"Error: Device name mismatch at index {i}. Expected {device_name}, found {csv_row_name} in CSV.")
-                
-                # Use device index directly as row index (CSV rows are in device order)
-                row_idx = i
-                
                 for j, target_device in enumerate(self.devices):
-                    # Access by position using numpy array
-                    value = comm_values[row_idx, j]
-                    # Check if value is NaN (numpy.nan)
-                    if pd.isna(value) or (isinstance(value, float) and (value != value)):  # NaN check: value != value
-                        sys.exit("Error: No NA is expected.")
-                    else:
-                        self.bandwidth[i][j] = int(value)
+                    bandwidth_value = bandwidth_values[i][j]
+                    latency_value = latency_values[i][j]
+                    if pd.isna(bandwidth_value) or (isinstance(bandwidth_value, float) and (bandwidth_value != bandwidth_value)):
+                        sys.exit("Error: No NA is expected in bandwidth.")
+                    if pd.isna(latency_value) or (isinstance(latency_value, float) and (latency_value != latency_value)):
+                        sys.exit("Error: No NA is expected in latency.")
+                    self.bandwidth[i][j] = int(bandwidth_value)
+                    self.latency[i][j] = int(latency_value)
 
             # Initialize tasks
             df = pd.read_csv(self.task_csv_path)
@@ -287,23 +293,16 @@ preamble {=
                 transfer_start_time = max(source_comm_available, target_comm_available, parent_completion_time, current_time)
                 
                 # Calculate transfer time
-                data_size = task.input_size
-                bandwidth = system.bandwidth[parent_device.index][device.index]
-                
-                if data_size == 0:
-                    transfer_time = 0
-                elif bandwidth == 0:
-                    # Same device (shouldn't happen here, but handle gracefully)
-                    transfer_time = 0
-                else:
-                    transfer_time = transfer_time_ms(data_size, bandwidth)
+                data_size = parent_task.output_size
+                transfer_time = channel_delay_ms(system, parent_device.index, device.index, data_size)
+                if transfer_time is None:
+                    return sys.maxsize
                 
                 comm_end_time = transfer_start_time + transfer_time
                 logger.debug(f"comm_end_time = {comm_end_time}")
         else:
-            # No parent: check if transfer needed from device[0]
-            # TODO: This should be the source device.
-            source_device = system.devices[0]
+            # No parent: check if transfer needed from the task's source device.
+            source_device = system.devices[task.source_device_index]
             
             if source_device == device:
                 # Same device, no communication needed
@@ -318,15 +317,9 @@ preamble {=
                 
                 # Calculate transfer time
                 data_size = task.input_size
-                bandwidth = system.bandwidth[source_device.index][device.index]
-                
-                if data_size == 0:
-                    transfer_time = 0
-                elif bandwidth == 0:
-                    # Invalid bandwidth
+                transfer_time = channel_delay_ms(system, source_device.index, device.index, data_size)
+                if transfer_time is None:
                     return sys.maxsize
-                else:
-                    transfer_time = transfer_time_ms(data_size, bandwidth)
                 
                 comm_end_time = transfer_start_time + transfer_time
         
@@ -358,20 +351,13 @@ preamble {=
         logger.debug(f"compute_communication_cost: parent = {parent_task.name}, child = {child_task.name}")
         data_length = child_task.input_size
         
-        if data_length == 0:
-            return 0
-
         # Compute average communication time across all device pairs
         total_cost = 0
         for i in range(system.num_devices):
             for j in range(system.num_devices):
-                bandwidth = system.bandwidth[i][j]
-                if bandwidth > 0:  # For different devices, compute the cost. For the same device, there's no cost.
-                    # Communication cost = data_length / bandwidth
-                    # logger.debug(f"Device pair ({i}, {j}), size = {data_length}, bandwidth = {bandwidth}")
-                    cost = data_length / bandwidth
+                cost = channel_delay_ms(system, i, j, data_length)
+                if cost is not None:
                     total_cost += cost
-                    # total_cost += math.ceil(cost)
                 
         logger.debug(f"Total cost = {total_cost}, num_device = {system.num_devices}")
         
@@ -814,14 +800,9 @@ preamble {=
                     # Calculate transfer time using parent's output_size
                     # Note: Each parent sends its own output data
                     data_size = parent_task.output_size
-                    bandwidth = system.bandwidth[parent_device.index][device.index]
-                    
-                    if data_size == 0:
-                        transfer_time = 0
-                    elif bandwidth == 0:
+                    transfer_time = channel_delay_ms(system, parent_device.index, device.index, data_size)
+                    if transfer_time is None:
                         sys.exit(f"Error: Bandwidth between {parent_device.name} and {device.name} is 0")
-                    else:
-                        transfer_time = transfer_time_ms(data_size, bandwidth)
                     
                     transfer_end_time = transfer_start_time + transfer_time
                     
@@ -844,7 +825,7 @@ preamble {=
                     
                     logger.debug(f"Transfer from parent {parent_task.name} (device {parent_device.index}) to child {task.name} "
                             f"(device {device.index}): start={transfer_start_time}, end={transfer_end_time}, "
-                            f"data_size={data_size}, bandwidth={bandwidth}")
+                            f"data_size={data_size}")
                 
                 # Child task's communication ends when all parent transfers complete
                 # If all parents are on the same device as child, no transfers needed
@@ -877,14 +858,9 @@ preamble {=
                     
                     # Calculate transfer time using task's input_size
                     data_size = task.input_size
-                    bandwidth = system.bandwidth[source_device.index][device.index]
-                    
-                    if data_size == 0:
-                        transfer_time = 0
-                    elif bandwidth == 0:
+                    transfer_time = channel_delay_ms(system, source_device.index, device.index, data_size)
+                    if transfer_time is None:
                         sys.exit(f"Error: Bandwidth between {source_device.name} and {device.name} is 0")
-                    else:
-                        transfer_time = transfer_time_ms(data_size, bandwidth)
                     
                     transfer_end_time = transfer_start_time + transfer_time
                     
@@ -1065,6 +1041,7 @@ reactor Scheduler {
 
     input change
     input tasks
+    input network_info
 
     state dev_mobile = [0, [], [], []]  # MobileRobot device_index 0
     state dev_edge = [1, [], [], []]    # Edge device_index 1
@@ -1073,14 +1050,17 @@ reactor Scheduler {
     // state bandwidth = [[0, 2, 5], [2, 0, 3], [5, 3, 0]] # link rates (MB/s) between devices
     output[3] task_chains
 
-    reaction(startup, change, tasks) -> task_chains {=
+    reaction(change, tasks, network_info) -> task_chains {=
+        if not network_info.is_present:
+            return
+
         task_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Tasks.csv"
         dependency_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Dependencies.csv"
-        bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Bandwidth.csv"
+        network_info_value = network_info.value
 
         system = System(task_csv_path=task_csv_path, 
                     dependency_csv_path=dependency_csv_path, 
-                    bandwidth_csv_path=bandwidth_csv_path, 
+                    network_info=network_info_value,
                     num_devices=3)
 
         global_deadline = system.period
@@ -1132,8 +1112,35 @@ reactor Scheduler {
 reactor EnvironmentUpdateDetector {
     // timer t(0, 10 sec)
     output change
-    reaction(startup) -> change {=
+    output network_info
 
+    reaction(startup) -> change, network_info {=
+        bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Bandwidth.csv"
+        comm_df = pd.read_csv(bandwidth_csv_path, index_col=0)
+        comm_df.columns = comm_df.columns.str.strip()
+        comm_df.index = comm_df.index.str.strip()
+
+        device_names = list(comm_df.columns)
+        bandwidth = []
+        for i in range(len(device_names)):
+            row = []
+            for j in range(len(device_names)):
+                v = comm_df.iloc[i, j]
+                row.append(int(v) if not pd.isna(v) else 0)
+            bandwidth.append(row)
+
+        latency = [
+            [0, 150, 120],
+            [150, 0, 130],
+            [120, 130, 0],
+        ]
+
+        network_info.set({
+            "device_names": device_names,
+            "bandwidth": bandwidth,
+            "latency": latency
+        })
+        change.set(True)
     =}
 }
 
@@ -1335,16 +1342,17 @@ main reactor {
     o = new OutputVisualizer()
 
     t.tasks, e.change -> s.tasks, s.change
+    e.network_info -> s.network_info, r_1.network_info, r_2.network_info, r_3.network_info
 
     // v.csv_path -> s.csv_path
     s.task_chains -> r_1.task_chains, r_2.task_chains, r_3.task_chains
 
-    r_1.send_edge -> r_2.recv_mobile_robot after 150 ms
-    r_1.send_cloudlet -> r_3.recv_mobile_robot after 120 ms
-    r_2.send_mobile_robot -> r_1.recv_edge after 150 ms
-    r_2.send_cloudlet -> r_3.recv_edge after 130 ms
-    r_3.send_mobile_robot -> r_1.recv_cloudlet after 120 ms
-    r_3.send_edge -> r_2.recv_cloudlet after 130 ms
+    r_1.send_edge -> r_2.recv_mobile_robot
+    r_1.send_cloudlet -> r_3.recv_mobile_robot
+    r_2.send_mobile_robot -> r_1.recv_edge
+    r_2.send_cloudlet -> r_3.recv_edge
+    r_3.send_mobile_robot -> r_1.recv_cloudlet
+    r_3.send_edge -> r_2.recv_cloudlet
 
     r_1.final_output, r_2.final_output, r_3.final_output -> o.r1_output, o.r2_output, o.r3_output
     r_1.trace_output -> o.r1_trace
