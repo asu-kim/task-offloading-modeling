@@ -1,0 +1,15 @@
+target Python
+
+preamble {=
+
+=}
+
+reactor Send {
+    state bandwidth
+    input in_data
+    output out_data
+    logical action end_comm
+    reaction(in_data) {=
+
+    =}
+}

@@ -1,0 +1,240 @@
+target Python
+preamble {=
+    import time
+    import pandas as pd
+
+    time_unit = 1
+
+    def _load_bandwidth_matrix():
+        bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Bandwidth.csv"
+        comm_df = pd.read_csv(bandwidth_csv_path, index_col=0)
+        comm_df.columns = comm_df.columns.str.strip()
+        comm_df.index = comm_df.index.str.strip()
+        n = len(comm_df.columns)
+        bandwidth = [[0] * n for _ in range(n)]
+        for i in range(n):
+            for j in range(n):
+                v = comm_df.iloc[i, j]
+                bandwidth[i][j] = int(v) if not pd.isna(v) else 0
+        return bandwidth
+
+    def _accept_chain_packet(reactor, packet):
+        if not isinstance(packet, dict) or "task" not in packet or "device" not in packet:
+            return
+        if packet["device"] != reactor.device_index:
+            return
+
+        task = packet["task"]
+        task_index = task.index
+        if task_index in reactor.completed_task_indexes:
+            return
+        if reactor.current_packet is not None and reactor.current_packet["task"].index == task_index:
+            return
+
+        if task_index not in reactor.pending_task_packets:
+            reactor.pending_task_packets[task_index] = packet
+
+        parent_task = packet.get("parent_task")
+        reactor.received_parent_indexes.setdefault(task_index, set())
+        if parent_task is not None:
+            reactor.received_parent_indexes[task_index].add(parent_task.index)
+
+        required_parents = set(task.parent_task_indexes)
+        received_parents = reactor.received_parent_indexes[task_index]
+        if len(required_parents) > 0 and not required_parents.issubset(received_parents):
+            print(f"{reactor.device_name}: Waiting for parents of task {task.name}. "
+                  f"received={sorted(received_parents)}, required={sorted(required_parents)}")
+            return
+
+        if any(queued["task"].index == task_index for queued in reactor.task_queue):
+            return
+        reactor.task_queue.append(reactor.pending_task_packets[task_index])
+
+    def _schedule_next_chain_task(reactor, start_execution):
+        if reactor.current_packet is None and len(reactor.task_queue) > 0:
+            reactor.current_packet = reactor.task_queue.pop(0)
+            task = reactor.current_packet["task"]
+            print(f"{reactor.device_name}: Schedule task {task.name}")
+            start_execution.schedule(0)
+=}
+
+reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
+    state task_queue = []
+    state current_packet
+    state pending_task_packets
+    state received_parent_indexes
+    state completed_task_indexes = []
+    state trace_events = []
+    state current_comp_start_time = 0.0
+    state pending_packets = []
+    state bandwidth = []
+    state sender_trace_next_sec = 0.0
+
+    input task_chains
+    input recv_edge
+    input recv_cloudlet
+
+    logical action start_execution
+    logical action end_execution
+    logical action send_packet
+
+    output send_edge
+    output send_cloudlet
+    output final_output
+    output trace_output
+
+    reaction(startup) {=
+        self.task_queue = []
+        self.current_packet = None
+        self.pending_task_packets = {}
+        self.received_parent_indexes = {}
+        self.completed_task_indexes = set()
+        self.trace_events = []
+        self.pending_packets = []
+        self.sender_trace_next_sec = 0.0
+        self.bandwidth = _load_bandwidth_matrix()
+    =}
+
+    reaction(task_chains) -> start_execution, send_packet, trace_output {=
+        self.task_queue = []
+        self.current_packet = None
+        self.pending_task_packets = {}
+        self.received_parent_indexes = {}
+        self.completed_task_indexes = set()
+        self.trace_events = []
+        self.pending_packets = []
+        self.sender_trace_next_sec = 0.0
+
+        chains = task_chains.value if task_chains.is_present and isinstance(task_chains.value, list) else []
+        print(f"{self.device_name}: Received {len(chains)} initial chain packet(s).")
+
+        for packet in chains:
+            if isinstance(packet, dict) and packet.get("device") == self.device_index:
+                _accept_chain_packet(self, packet)
+            else:
+                self.pending_packets.append(packet)
+
+        if len(self.pending_packets) > 0:
+            send_packet.schedule(0)
+        _schedule_next_chain_task(self, start_execution)
+        trace_output.set(self.trace_events)
+    =}
+
+    reaction(recv_edge, recv_cloudlet) -> start_execution, send_packet {=
+        packets = []
+        if recv_edge.is_present:
+            packets.append(recv_edge.value)
+        if recv_cloudlet.is_present:
+            packets.append(recv_cloudlet.value)
+
+        for packet in packets:
+            if isinstance(packet, dict) and packet.get("device") == self.device_index:
+                _accept_chain_packet(self, packet)
+            else:
+                self.pending_packets.append(packet)
+
+        if len(self.pending_packets) > 0:
+            send_packet.schedule(0)
+        _schedule_next_chain_task(self, start_execution)
+    =}
+
+    reaction(start_execution) -> end_execution {=
+        if self.current_packet is None:
+            return
+
+        elapsed_logical_time = lf.time.logical_elapsed()
+        self.current_comp_start_time = elapsed_logical_time / 1e9
+        elapsed_physical_time = lf.time.physical_elapsed()
+
+        task = self.current_packet["task"]
+        print(f"{self.device_name}: Execute task {task.name}")
+        print(f"{self.device_name}: Tag = ({elapsed_logical_time}, {lf.tag().microstep}) "
+              f"and physical time = {elapsed_physical_time}")
+        exec_time_ms = task.execution_times[self.device_index]
+        time.sleep(exec_time_ms / 1000.0 / time_unit)
+        end_execution.schedule(MSEC(int(exec_time_ms)))
+    =} deadline(10 sec) {=
+        print(f"In {self.device_name}'s deadline handler.")
+        elapsed_logical_time = lf.time.logical_elapsed()
+        elapsed_physical_time = lf.time.physical_elapsed()
+        print(f"Logical time = {elapsed_logical_time} and physical time = {elapsed_physical_time}")
+    =}
+
+    reaction(end_execution) -> start_execution, send_packet, final_output, trace_output {=
+        if self.current_packet is None:
+            return
+
+        completed_packet = self.current_packet
+        completed_task = completed_packet["task"]
+        task_index = completed_task.index
+        end_time_sec = lf.time.logical_elapsed() / 1e9
+        end_ms = end_time_sec * 1000.0
+        deadline_ms = int(completed_task.deadline) if completed_task.deadline is not None else -1
+        deadline_met = True if deadline_ms <= 0 else (end_ms <= float(deadline_ms))
+
+        self.trace_events.append({
+            "type": "comp",
+            "task_name": completed_task.name,
+            "device_index": self.device_index,
+            "device_name": self.device_name,
+            "start_time": self.current_comp_start_time,
+            "end_time": end_time_sec,
+            "deadline_ms": deadline_ms,
+            "deadline_met": deadline_met
+        })
+
+        self.completed_task_indexes.add(task_index)
+        self.pending_task_packets.pop(task_index, None)
+        self.received_parent_indexes.pop(task_index, None)
+        self.current_packet = None
+
+        for continuation in completed_packet.get("continuations", []):
+            next_packet = dict(continuation)
+            next_packet["parent_task"] = completed_task
+            destination_device = next_packet.get("device")
+
+            if destination_device == self.device_index:
+                _accept_chain_packet(self, next_packet)
+                continue
+
+            output_size = completed_task.output_size
+            bw = self.bandwidth[self.device_index][destination_device] if self.bandwidth else 0
+            transfer_ms = transfer_time_ms(output_size, bw) if bw > 0 else 0
+            trace_send_time_sec = max(self.sender_trace_next_sec, end_time_sec)
+
+            self.trace_events.append({
+                "type": "comm_send",
+                "task_name": next_packet["task"].name,
+                "from_device": self.device_index,
+                "to_device": destination_device,
+                "start_time": trace_send_time_sec,
+                "output_size": output_size
+            })
+            self.sender_trace_next_sec = trace_send_time_sec + (transfer_ms / 1000.0)
+            self.pending_packets.append(next_packet)
+            print(f"{self.device_name}: Forwarding task {next_packet['task'].name} to device {destination_device}")
+
+        if len(self.pending_packets) > 0:
+            send_packet.schedule(0)
+        final_output.set(completed_task)
+        trace_output.set(self.trace_events)
+        _schedule_next_chain_task(self, start_execution)
+    =}
+
+    reaction(send_packet) -> send_edge, send_cloudlet, send_packet {=
+        if len(self.pending_packets) == 0:
+            return
+
+        packet = self.pending_packets.pop(0)
+        destination_device = packet.get("device") if isinstance(packet, dict) else None
+        if destination_device == 1:
+            send_edge.set(packet)
+        elif destination_device == 2:
+            send_cloudlet.set(packet)
+        else:
+            print(f"{self.device_name}: Error - invalid direct destination {destination_device}")
+
+        if len(self.pending_packets) > 0:
+            send_packet.schedule(0)
+    =}
+}
