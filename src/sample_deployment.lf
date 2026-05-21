@@ -1356,12 +1356,12 @@ main reactor {
     // v.csv_path -> s.csv_path
     s.task_chains -> r_1.task_chains, r_2.task_chains, r_3.task_chains
 
-    r_1.send_edge -> r_2.recv_mobile_robot after 0
-    r_1.send_cloudlet -> r_3.recv_mobile_robot after 0
-    r_2.send_mobile_robot -> r_1.recv_edge after 0
-    r_2.send_cloudlet -> r_3.recv_edge after 0
-    r_3.send_mobile_robot -> r_1.recv_cloudlet after 0
-    r_3.send_edge -> r_2.recv_cloudlet after 0
+    r_1.send_edge -> r_2.recv_mobile_robot 
+    r_1.send_cloudlet -> r_3.recv_mobile_robot 
+    r_2.send_mobile_robot -> r_1.recv_edge 
+    r_2.send_cloudlet -> r_3.recv_edge 
+    r_3.send_mobile_robot -> r_1.recv_cloudlet 
+    r_3.send_edge -> r_2.recv_cloudlet 
 
     r_1.final_output, r_2.final_output, r_3.final_output -> o.r1_output, o.r2_output, o.r3_output
     r_1.trace_output -> o.r1_trace
