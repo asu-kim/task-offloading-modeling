@@ -1,5 +1,9 @@
 target Python
 
+preamble {=
+    from pathlib import Path
+=}
+
 reactor NetworkFabric {
     // network packet format: [destination, payload size]
     input in_port0
@@ -18,7 +22,7 @@ reactor NetworkFabric {
     state pending_packet  # Store packet temporarily for routing
 
     reaction(startup) {=
-        bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Bandwidth.csv"
+        bandwidth_csv_path = str(Path(__file__).resolve().parents[2] / "Bandwidth.csv")
 
         self.devices = [Device() for _ in range(self.num_devices)]
         self.bandwidth = [[0] * self.num_devices for _ in range(self.num_devices)]

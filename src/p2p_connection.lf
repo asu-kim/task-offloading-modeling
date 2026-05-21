@@ -12,11 +12,17 @@ preamble {=
     import logging
     import os
     from dataclasses import dataclass, field
+    from pathlib import Path
     from typing import Deque, List, Dict, Tuple, Union, Set
     import pandas as pd
     from collections import deque
 
     logger = logging.getLogger(__name__)
+
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+    def project_path(*parts):
+        return str(PROJECT_ROOT.joinpath(*parts))
 
     @dataclass
     class Task:
@@ -973,9 +979,9 @@ reactor Scheduler {
     output[3] tasks_to_run
 
     reaction(startup) -> tasks_to_run {=
-        task_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Tasks.csv"
-        dependency_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Dependencies.csv"
-        bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Bandwidth.csv"
+        task_csv_path = project_path("Tasks.csv")
+        dependency_csv_path = project_path("Dependencies.csv")
+        bandwidth_csv_path = project_path("Bandwidth.csv")
 
         system = System(task_csv_path=task_csv_path, 
                     dependency_csv_path=dependency_csv_path, 

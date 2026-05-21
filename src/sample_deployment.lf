@@ -12,6 +12,7 @@ preamble {=
     import logging
     import os
     from dataclasses import dataclass, field
+    from pathlib import Path
     from typing import Deque, List, Dict, Tuple, Union, Set
     import pandas as pd
     from collections import deque
@@ -22,6 +23,11 @@ preamble {=
     from matplotlib.lines import Line2D
 
     logger = logging.getLogger(__name__)
+
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+    def project_path(*parts):
+        return str(PROJECT_ROOT.joinpath(*parts))
 
     def transfer_time_ms(data_size_mb: float, bandwidth_mb_per_sec: int) -> int:
         """Transfer duration used by scheduler model (same convention as inference-offloading-scheduler)."""
@@ -1054,8 +1060,8 @@ reactor Scheduler {
         if not network_info.is_present:
             return
 
-        task_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Tasks.csv"
-        dependency_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Dependencies.csv"
+        task_csv_path = project_path("Tasks.csv")
+        dependency_csv_path = project_path("Dependencies.csv")
         network_info_value = network_info.value
 
         system = System(task_csv_path=task_csv_path, 
@@ -1115,7 +1121,7 @@ reactor EnvironmentUpdateDetector {
     output network_info
 
     reaction(startup) -> change, network_info {=
-        bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Bandwidth.csv"
+        bandwidth_csv_path = project_path("Bandwidth.csv")
         comm_df = pd.read_csv(bandwidth_csv_path, index_col=0)
         comm_df.columns = comm_df.columns.str.strip()
         comm_df.index = comm_df.index.str.strip()
@@ -1152,7 +1158,7 @@ reactor TaskSetSource {
     =}
 }
 
-reactor OutputVisualizer(bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Bandwidth.csv") {
+reactor OutputVisualizer(bandwidth_csv_path = "Bandwidth.csv") {
     input r1_output
     input r2_output
     input r3_output
@@ -1171,7 +1177,7 @@ reactor OutputVisualizer(bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/tas
         self.reactor_to_csv = {0: 0, 1: 1, 2: 2}
         # Load bandwidth matrix for computing comm durations
         import pandas as pd
-        comm_df = pd.read_csv(self.bandwidth_csv_path, index_col=0)
+        comm_df = pd.read_csv(project_path(self.bandwidth_csv_path), index_col=0)
         comm_df.columns = comm_df.columns.str.strip()
         comm_df.index = comm_df.index.str.strip()
         csv_names = list(comm_df.columns)
@@ -1325,7 +1331,7 @@ reactor OutputVisualizer(bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/tas
         handles.append(Line2D([0], [0], color="0.35", linestyle="--", lw=1.5, label="Deadline"))
         ax.legend(handles=handles, title="Task types")
         plt.tight_layout()
-        out_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/schedule_trace_deployment.png"
+        out_path = project_path("schedule_trace_deployment.png")
         plt.savefig(out_path, dpi=150)
         plt.close(fig)
     =}

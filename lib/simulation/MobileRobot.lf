@@ -1,6 +1,7 @@
 target Python
 preamble {=
     import time
+    from pathlib import Path
     time_unit = 1
 =}
 
@@ -38,7 +39,7 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
         self.sender_trace_next_sec = 0.0
 
         # Load bandwidth matrix for communication-trace timing.
-        bandwidth_csv_path = "/Users/bjun5/projects/asu-kim/task-offloading-modeling/Bandwidth.csv"
+        bandwidth_csv_path = str(Path(__file__).resolve().parents[2] / "Bandwidth.csv")
         comm_df = pd.read_csv(bandwidth_csv_path, index_col=0)
         comm_df.columns = comm_df.columns.str.strip()
         comm_df.index = comm_df.index.str.strip()
