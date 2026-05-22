@@ -1,4 +1,6 @@
-target Python
+target Python {
+    # coordination: decentralized
+}
 
 import MobileRobot from "../lib/deployment/MobileRobot.lf"
 import Edge from "../lib/deployment/Edge.lf"
@@ -1167,16 +1169,27 @@ reactor OutputVisualizer(bandwidth_csv_path = "Bandwidth.csv") {
     input r3_trace
 
     state received_traces = []
+    state completed_task_indexes = []
+    state total_task_count = 0
     state plotted = False
     state bandwidth = []
     state reactor_to_csv = []
 
     reaction(startup) {=
         self.received_traces = []
+        self.completed_task_indexes = set()
+        self.total_task_count = 0
         self.bandwidth = []
         self.reactor_to_csv = {0: 0, 1: 1, 2: 2}
-        # Load bandwidth matrix for computing comm durations
+
         import pandas as pd
+        task_df = pd.read_csv(project_path("Tasks.csv"))
+        for _, row in task_df.iterrows():
+            name = str(row.iloc[0]).strip()
+            if name and name.lower() != "nan":
+                self.total_task_count += 1
+
+        # Load bandwidth matrix for computing comm durations
         comm_df = pd.read_csv(project_path(self.bandwidth_csv_path), index_col=0)
         comm_df.columns = comm_df.columns.str.strip()
         comm_df.index = comm_df.index.str.strip()
@@ -1189,7 +1202,15 @@ reactor OutputVisualizer(bandwidth_csv_path = "Bandwidth.csv") {
                 self.bandwidth[i][j] = int(v) if not pd.isna(v) else 0
     =}
 
-    reaction(r1_trace, r2_trace, r3_trace) {=
+    reaction(r1_output, r2_output, r3_output, r1_trace, r2_trace, r3_trace) {=
+        if self.plotted:
+            return
+
+        for output_port in [r1_output, r2_output, r3_output]:
+            if output_port.is_present and output_port.value is not None:
+                completed_task = output_port.value
+                self.completed_task_indexes.add(completed_task.index)
+
         trace_by_device = {dev_id: trace for dev_id, trace in self.received_traces}
         if r1_trace.is_present:
             trace_by_device[0] = r1_trace.value
@@ -1200,6 +1221,8 @@ reactor OutputVisualizer(bandwidth_csv_path = "Bandwidth.csv") {
         self.received_traces = list(trace_by_device.items())
 
         if len(trace_by_device) != 3:
+            return
+        if len(self.completed_task_indexes) < self.total_task_count:
             return
 
         self.plotted = True
@@ -1334,10 +1357,13 @@ reactor OutputVisualizer(bandwidth_csv_path = "Bandwidth.csv") {
         out_path = project_path("schedule_trace_deployment.png")
         plt.savefig(out_path, dpi=150)
         plt.close(fig)
+        print(f"OutputVisualizer: Wrote {out_path}. Stopping deployment run.", flush=True)
+        request_stop()
     =}
 }
 
 main reactor {
+// federated reactor at 10.218.100.78 {
     s = new Scheduler()
     r_1 = new MobileRobot()
     r_2 = new Edge()

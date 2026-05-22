@@ -1,2 +1,6 @@
 pandas
 matplotlib
+accelerate
+transformers
+tokenizers
+bitsandbytes>=0.43.0
