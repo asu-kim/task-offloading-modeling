@@ -334,7 +334,7 @@ reactor Cloudlet(device_index = 2, device_name = "Cloudlet") {
     state trace_events = []
     state current_comp_start_time = 0.0
     state pending_packets = []
-    state llm_results = {}
+    state llm_results
     state llm_thread
     state llm_error
 
