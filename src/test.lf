@@ -1,0 +1,26 @@
+target Python {
+    coordination: decentralized,
+    logging: DEBUG
+}
+
+reactor Blackwell {
+    input in1
+    reaction(in1) {=
+        print(f"Input is {in1.value}")
+        request_stop()
+    =}
+}
+
+reactor Mac {
+    output out
+    reaction(startup) -> out {=
+        print("Send 42")
+        out.set(42)
+    =}
+}
+
+federated reactor at 10.218.101.78 {
+    b = new Blackwell()
+    m = new Mac()
+    m.out -> b.in1
+}

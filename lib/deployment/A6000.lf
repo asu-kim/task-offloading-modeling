@@ -1,5 +1,4 @@
 target Python
-
 preamble {=
     import time
 
@@ -43,6 +42,7 @@ preamble {=
             return
 
         now_sec = lf.time.logical_elapsed() / 1e9
+        trace_now_sec = lf.time.physical_elapsed() / 1e9
         delay_ms = _network_receiver_delay_ms(reactor, packet)
         network_start_sec = max(now_sec, network_available_sec)
         network_end_sec = network_start_sec + (float(delay_ms) / 1000.0)
@@ -50,13 +50,16 @@ preamble {=
 
         packet["network_start_time_sec"] = network_start_sec
         packet["network_end_time_sec"] = network_end_sec
+        packet["network_trace_start_time_sec"] = packet.get("sent_time_sec", trace_now_sec)
+        packet["network_trace_end_time_sec"] = trace_now_sec
 
         pending = reactor.pending_packets.setdefault(source_name, [])
         pending.append(packet)
         pending.sort(key=lambda pending_packet: pending_packet["network_end_time_sec"])
 
         wait_ms = max(0, int((network_end_sec - now_sec) * 1000.0 + 0.999999))
-        delay_action.schedule(MSEC(wait_ms))
+        # delay_action.schedule(MSEC(wait_ms))
+        delay_action.schedule(0)
         task = packet.get("task")
         task_name = task.name if task is not None else "unknown"
         print(f"{reactor.receiver_device_name}: Queued network delivery for task {task_name} "
@@ -77,6 +80,7 @@ preamble {=
             return None
 
         packet = pending.pop(0)
+        packet["network_trace_end_time_sec"] = lf.time.physical_elapsed() / 1e9
         if len(pending) > 0:
             next_packet = pending[0]
             wait_ms = max(0, int((next_packet["network_end_time_sec"] - now_sec) * 1000.0 + 0.999999))
@@ -127,8 +131,8 @@ preamble {=
         if not isinstance(packet, dict):
             return
         sender_device = packet.get("sender_device")
-        start_time_sec = packet.get("network_start_time_sec")
-        end_time_sec = packet.get("network_end_time_sec")
+        start_time_sec = packet.get("network_trace_start_time_sec", packet.get("network_start_time_sec"))
+        end_time_sec = packet.get("network_trace_end_time_sec", packet.get("network_end_time_sec"))
         task = packet.get("task")
         if sender_device is None or start_time_sec is None or end_time_sec is None or task is None:
             return
@@ -144,25 +148,26 @@ preamble {=
             "end_time": end_time_sec,
             "output_size": packet.get("payload_size", 0)
         })
+
 =}
 
-reactor NetworkReceiver(receiver_device_index = 0, receiver_device_name = "MobileRobot") {
+reactor EdgeNetworkReceiver(receiver_device_index = 1, receiver_device_name = "A6000") {
     state pending_packets
     state bandwidth = []
     state latency = []
 
     input network_info
-    input recv_edge
+    input recv_mobile_robot
     input recv_cloudlet
 
-    logical action comm_delay_edge
+    logical action comm_delay_mobile_robot
     logical action comm_delay_cloudlet
 
-    output forward_edge
+    output forward_mobile_robot
     output forward_cloudlet
 
     reaction(startup) {=
-        self.pending_packets = {"edge": [], "cloudlet": []}
+        self.pending_packets = {"mobile_robot": [], "cloudlet": []}
         self.bandwidth = []
         self.latency = []
     =}
@@ -171,18 +176,18 @@ reactor NetworkReceiver(receiver_device_index = 0, receiver_device_name = "Mobil
         _apply_network_info(self, network_info.value)
     =}
 
-    reaction(recv_edge, recv_cloudlet) -> comm_delay_edge, comm_delay_cloudlet {=
-        if recv_edge.is_present:
-            _queue_network_receiver_packet(self, "edge", recv_edge.value, comm_delay_edge)
+    reaction(recv_mobile_robot, recv_cloudlet) -> comm_delay_mobile_robot, comm_delay_cloudlet {=
+        if recv_mobile_robot.is_present:
+            _queue_network_receiver_packet(self, "mobile_robot", recv_mobile_robot.value, comm_delay_mobile_robot)
 
         if recv_cloudlet.is_present:
             _queue_network_receiver_packet(self, "cloudlet", recv_cloudlet.value, comm_delay_cloudlet)
     =}
 
-    reaction(comm_delay_edge) -> forward_edge {=
-        packet = _pop_ready_network_receiver_packet(self, "edge", comm_delay_edge)
+    reaction(comm_delay_mobile_robot) -> forward_mobile_robot {=
+        packet = _pop_ready_network_receiver_packet(self, "mobile_robot", comm_delay_mobile_robot)
         if packet is not None:
-            forward_edge.set(packet)
+            forward_mobile_robot.set(packet)
     =}
 
     reaction(comm_delay_cloudlet) -> forward_cloudlet {=
@@ -192,7 +197,7 @@ reactor NetworkReceiver(receiver_device_index = 0, receiver_device_name = "Mobil
     =}
 }
 
-reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
+reactor A6000(device_index = 1, device_name = "A6000") {
     state task_queue = []
     state current_packet
     state pending_task_packets
@@ -204,21 +209,21 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
 
     input network_info
     input task_chains
-    input recv_edge
+    input recv_mobile_robot
     input recv_cloudlet
 
     logical action start_execution
     logical action end_execution
     logical action send_packet
 
-    output send_edge
+    output send_mobile_robot
     output send_cloudlet
     output final_output
     output trace_output
 
-    nr = new NetworkReceiver()
+    nr = new EdgeNetworkReceiver()
     network_info -> nr.network_info
-    recv_edge -> nr.recv_edge
+    recv_mobile_robot -> nr.recv_mobile_robot
     recv_cloudlet -> nr.recv_cloudlet
 
     reaction(startup) {=
@@ -236,8 +241,8 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
             return
 
         elapsed_logical_time = lf.time.logical_elapsed()
-        self.current_comp_start_time = elapsed_logical_time / 1e9
         elapsed_physical_time = lf.time.physical_elapsed()
+        self.current_comp_start_time = elapsed_physical_time / 1e9
 
         task = self.current_packet["task"]
         print(f"{self.device_name}: Execute task {task.name}")
@@ -260,7 +265,7 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
         completed_packet = self.current_packet
         completed_task = completed_packet["task"]
         task_index = completed_task.index
-        end_time_sec = lf.time.logical_elapsed() / 1e9
+        end_time_sec = lf.time.physical_elapsed() / 1e9
         end_ms = end_time_sec * 1000.0
         deadline_ms = int(completed_task.deadline) if completed_task.deadline is not None else -1
         deadline_met = True if deadline_ms <= 0 else (end_ms <= float(deadline_ms))
@@ -301,18 +306,18 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
         _schedule_next_chain_task(self, start_execution)
     =}
 
-    reaction(send_packet) -> send_edge, send_cloudlet, send_packet {=
+    reaction(send_packet) -> send_mobile_robot, send_cloudlet, send_packet {=
         if len(self.pending_packets) == 0:
             return
 
-        now_sec = lf.time.logical_elapsed() / 1e9
+        now_sec = lf.time.physical_elapsed() / 1e9
         packet = self.pending_packets.pop(0)
         destination_device = packet.get("device") if isinstance(packet, dict) else None
         if isinstance(packet, dict):
             packet["sender_device"] = self.device_index
             packet["sent_time_sec"] = now_sec
-        if destination_device == 1:
-            send_edge.set(packet)
+        if destination_device == 0:
+            send_mobile_robot.set(packet)
         elif destination_device == 2:
             send_cloudlet.set(packet)
         else:
@@ -322,12 +327,13 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
             send_packet.schedule(0)
     =}
 
-    reaction(task_chains) -> start_execution, send_packet {=
+    reaction(task_chains) -> start_execution, send_packet, trace_output {=
         self.task_queue = []
         self.current_packet = None
         self.pending_task_packets = {}
         self.received_parent_indexes = {}
         self.completed_task_indexes = set()
+        self.trace_events = []
         self.pending_packets = []
 
         chains = task_chains.value if task_chains.is_present and isinstance(task_chains.value, list) else []
@@ -348,12 +354,13 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
         if len(self.pending_packets) > 0:
             send_packet.schedule(0)
         _schedule_next_chain_task(self, start_execution)
+        trace_output.set(self.trace_events)
     =}
 
-    reaction(nr.forward_edge, nr.forward_cloudlet) -> start_execution, send_packet {=
+    reaction(nr.forward_mobile_robot, nr.forward_cloudlet) -> start_execution, send_packet {=
         packets = []
-        if nr.forward_edge.is_present:
-            packets.append(nr.forward_edge.value)
+        if nr.forward_mobile_robot.is_present:
+            packets.append(nr.forward_mobile_robot.value)
         if nr.forward_cloudlet.is_present:
             packets.append(nr.forward_cloudlet.value)
 

@@ -106,15 +106,15 @@ reactor NetworkFabric {
             destination_device = packet["destination_device"]
             
             # Route to the appropriate output port based on destination device index
-            # Device 0 = MobileRobot (out_port0), Device 1 = Cloudlet (out_port1), Device 2 = Edge (out_port2)
+            # Device 0 = Jetson (out_port0), Device 1 = A6000 (out_port1), Device 2 = Blackwell (out_port2)
             if destination_device == 0:
-                print(f"NetworkFabric: Routing packet from device {source_port} to device 0 (MobileRobot)")
+                print(f"NetworkFabric: Routing packet from device {source_port} to device 0 (Jetson)")
                 out_port0_trigger.schedule(0)
             elif destination_device == 1:
-                print(f"NetworkFabric: Routing packet from device {source_port} to device 1 (Cloudlet)")
+                print(f"NetworkFabric: Routing packet from device {source_port} to device 1 (A6000)")
                 out_port1_trigger.schedule(0)
             elif destination_device == 2:
-                print(f"NetworkFabric: Routing packet from device {source_port} to device 2 (Edge)")
+                print(f"NetworkFabric: Routing packet from device {source_port} to device 2 (Blackwell)")
                 out_port2_trigger.schedule(0)
             else:
                 print(f"NetworkFabric: Error - Invalid destination device {destination_device}")

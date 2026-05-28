@@ -1,8 +1,8 @@
 target Python
 
-import MobileRobot from "../lib/simulation/MobileRobot.lf"
-import Edge from "../lib/simulation/Edge.lf"
-import Cloudlet from "../lib/simulation/Cloudlet.lf"
+import Jetson from "../lib/simulation/MobileRobot.lf"
+import A6000 from "../lib/simulation/Edge.lf"
+import Blackwell from "../lib/simulation/Cloudlet.lf"
 
 preamble {=
     import sys
@@ -40,7 +40,7 @@ preamble {=
         name: str = ""
         index: int = 0
         deadline: int = -1
-        execution_times: List[int] = field(default_factory=list)  # ms per device type (MobileRobot, Cloudlet, Edge)
+        execution_times: List[int] = field(default_factory=list)  # ms per device type (Jetson, A6000, Blackwell)
         child_task_indexes: List[int] = field(default_factory=list, repr=False)
         parent_task_indexes: List[int] = field(default_factory=list, repr=False)  # Reverse relationship
 
@@ -152,7 +152,7 @@ preamble {=
                 et_a_ms = int(float(row.iloc[2]))
                 et_b_ms = int(float(row.iloc[3]))
                 et_c_ms = int(float(row.iloc[4]))
-                # Internal device index order: 0 AGX, 1 A6000, 2 Blackwell
+                # Internal device index order: 0 Jetson, 1 A6000, 2 Blackwell
                 execution_times_ms = [et_a_ms, et_b_ms, et_c_ms]
                 task = Task(
                     name=name,
@@ -197,18 +197,18 @@ preamble {=
                         if j not in self.tasks[i].child_task_indexes:
                             self.tasks[i].child_task_indexes.append(j)
             
-            # Randomly assign source tasks (tasks with no parents) to AGX devices
-            agx_device_indices = [i for i, device in enumerate(self.devices) if device.name == "AGX"]
+            # Randomly assign source tasks (tasks with no parents) to Jetson devices
+            jetson_device_indices = [i for i, device in enumerate(self.devices) if device.name == "Jetson"]
             
-            if len(agx_device_indices) == 0:
-                sys.exit("Error: No AGX device found in system")
+            if len(jetson_device_indices) == 0:
+                sys.exit("Error: No Jetson device found in system")
             
             # Find all source tasks (tasks with no parents)
             source_tasks = [task for task in self.tasks if len(task.parent_task_indexes) == 0]
             
-            # Randomly assign each source task to an AGX device
+            # Randomly assign each source task to a Jetson device
             for task in source_tasks:
-                selected_index = random.choice(agx_device_indices)
+                selected_index = random.choice(jetson_device_indices)
                 task.source_device_index = selected_index
                 logger.debug(f"Assigned source task {task.name} to device {selected_index} ({self.devices[selected_index].name})")
             
@@ -334,8 +334,8 @@ preamble {=
         logger.debug(f"computation_start_time = max({last_task_completion_time}, {comm_end_time}) = {computation_start_time}")
         
         # 3. Compute finish time
-        # Map device name to execution time index (0=AGX, 1=A6000, 2=Blackwell)
-        device_name_to_index = {"AGX": 0, "A6000": 1, "Blackwell": 2}
+        # Map device name to execution time index (0=Jetson, 1=A6000, 2=Blackwell)
+        device_name_to_index = {"Jetson": 0, "A6000": 1, "Blackwell": 2}
         device_type_index = device_name_to_index.get(device.name)
         if device_type_index is None:
             logger.error(f"Unknown device name: {device.name}")
@@ -915,8 +915,8 @@ preamble {=
                 last_job_completion_time = current_time
             
             task.computation_start_time = max(last_job_completion_time, task.communication_end_time)
-            # Map device name to execution time index (0=AGX, 1=A6000, 2=Blackwell)
-            device_name_to_index = {"AGX": 0, "A6000": 1, "Blackwell": 2}
+            # Map device name to execution time index (0=Jetson, 1=A6000, 2=Blackwell)
+            device_name_to_index = {"Jetson": 0, "A6000": 1, "Blackwell": 2}
             device_type_index = device_name_to_index.get(device.name)
             if device_type_index is None:
                 logger.error(f"Unknown device name: {device.name}")
@@ -1059,10 +1059,10 @@ reactor Scheduler {
     input change
     input tasks
 
-    state dev_mobile = [0, [], [], []]  # MobileRobot device_index 0
-    state dev_edge = [2, [], [], []]    # Edge device_index 2
-    state dev_cloud = [1, [], [], []]  # Cloudlet device_index 1
-    // state tasks = [[0, 6, [4, 3, 2], 4, 4], [1, 10, [8, 5, 4], 4, 1]] # [index, deadline, [exec_time on MobileRobot, Cloudlet, Edge], input_size, output_size]
+    state dev_mobile = [0, [], [], []]  # Jetson device_index 0
+    state dev_edge = [1, [], [], []]    # A6000 device_index 1
+    state dev_cloud = [2, [], [], []]  # Blackwell device_index 2
+    // state tasks = [[0, 6, [4, 3, 2], 4, 4], [1, 10, [8, 5, 4], 4, 1]] # [index, deadline, [exec_time on Jetson, A6000, Blackwell], input_size, output_size]
     // state bandwidth = [[0, 2, 5], [2, 0, 3], [5, 3, 0]] # link rates (MB/s) between devices
     output[3] tasks_to_run
     output[3] communication_map
@@ -1222,11 +1222,11 @@ reactor OutputVisualizer(bandwidth_csv_path = "Bandwidth.csv") {
         comm_events = [e for e in all_events if e.get("type") == "comm_send"]
 
         # Always show all three devices (indices 0,1,2). HE may assign no work to one of them;
-        # previously we only listed devices with comp events, which hid idle devices like Cloudlet.
-        device_index_to_name = {0: "MobileRobot", 1: "Cloudlet", 2: "Edge"}
+        # previously we only listed devices with comp events, which hid idle devices like Blackwell.
+        device_index_to_name = {0: "Jetson", 1: "A6000", 2: "Blackwell"}
         for e in comp_events:
             device_index_to_name[e["device_index"]] = e["device_name"]
-        # Desired visual order (top -> bottom): MobileRobot, Edge, Cloudlet.
+        # Desired visual order (top -> bottom): Jetson, A6000, Blackwell.
         desired_top_to_bottom = [0, 1, 2]
         display_bottom_to_top = list(reversed(desired_top_to_bottom))
         num_devices = len(display_bottom_to_top)
@@ -1327,7 +1327,25 @@ reactor OutputVisualizer(bandwidth_csv_path = "Bandwidth.csv") {
         xmax_ms = max(xmax_ms, 100.0)
         xmax_ms = float(int(math.ceil(xmax_ms / 100.0)) * 100)
         ax.set_xlim(0.0, xmax_ms)
-        ax.xaxis.set_major_locator(mticker.MultipleLocator(100))
+
+        tick_quantum_ms = 100.0
+        max_tick_count = 10
+        if xmax_ms <= tick_quantum_ms * (max_tick_count - 1):
+            x_ticks = [float(v) for v in range(0, int(xmax_ms) + 1, int(tick_quantum_ms))]
+        else:
+            x_ticks = []
+            for i in range(max_tick_count):
+                raw_tick = (xmax_ms * i) / float(max_tick_count - 1)
+                clipped_tick = math.floor(raw_tick / tick_quantum_ms) * tick_quantum_ms
+                if len(x_ticks) == 0 or clipped_tick > x_ticks[-1]:
+                    x_ticks.append(float(clipped_tick))
+            max_clipped_tick = math.floor(xmax_ms / tick_quantum_ms) * tick_quantum_ms
+            if len(x_ticks) > 0:
+                x_ticks[-1] = float(max_clipped_tick)
+        ax.set_xticks(x_ticks)
+        ax.xaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda value, _: f"{int(math.floor(value / tick_quantum_ms) * tick_quantum_ms)}")
+        )
 
         ax.set_yticks(range(len(row_labels)))
         ax.set_yticklabels(row_labels)
@@ -1458,17 +1476,17 @@ reactor NetworkFabric {
                 schedule_wait_ms = int(math.ceil((ready_time_ns - now_ns) / 1000000.0))
 
                 if destination_device == 0:
-                    print(f"NetworkFabric: Routing packet from device {source_port} to device 0 (MobileRobot)")
+                    print(f"NetworkFabric: Routing packet from device {source_port} to device 0 (Jetson)")
                     self.pending_packets[0].append((ready_time_ns, packet))
                     self.pending_packets[0].sort(key=lambda x: x[0])
                     out_port0_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
                 elif destination_device == 1:
-                    print(f"NetworkFabric: Routing packet from device {source_port} to device 1 (Cloudlet)")
+                    print(f"NetworkFabric: Routing packet from device {source_port} to device 1 (A6000)")
                     self.pending_packets[1].append((ready_time_ns, packet))
                     self.pending_packets[1].sort(key=lambda x: x[0])
                     out_port1_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
                 elif destination_device == 2:
-                    print(f"NetworkFabric: Routing packet from device {source_port} to device 2 (Edge)")
+                    print(f"NetworkFabric: Routing packet from device {source_port} to device 2 (Blackwell)")
                     self.pending_packets[2].append((ready_time_ns, packet))
                     self.pending_packets[2].sort(key=lambda x: x[0])
                     out_port2_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
@@ -1536,9 +1554,9 @@ reactor NetworkFabric {
 
 main reactor {
     s = new Scheduler()
-    r_1 = new MobileRobot()
-    r_2 = new Edge()
-    r_3 = new Cloudlet()
+    r_1 = new Jetson()
+    r_2 = new A6000()
+    r_3 = new Blackwell()
     // v = new Visulizer()
     // sr = new SchedulingResult()
     n = new NetworkFabric()

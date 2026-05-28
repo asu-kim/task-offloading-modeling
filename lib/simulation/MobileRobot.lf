@@ -5,7 +5,7 @@ preamble {=
     time_unit = 1
 =}
 
-reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
+reactor Jetson(device_index = 0, device_name = "Jetson") {
     // state execution_time = [4, 8]
     state task_queue = []
     state tasks = []
@@ -54,11 +54,11 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
     reaction(tasks_to_run, communication_map) -> start_execution, send_packet, trace_output {=
         # Receive the tasks to run and communication map
         # Schedule the communication as well
-        print("In AGX")
+        print("In Jetson")
         self.task_queue = tasks_to_run.value
         self.comm_map = communication_map.value if communication_map.is_present else {}
         print(self.task_queue)
-        print(f"AGX communication map: {self.comm_map}")
+        print(f"Jetson communication map: {self.comm_map}")
         print("")
 
         # Check for source tasks that need initial input data sent to other devices
@@ -94,7 +94,7 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
                         "is_source_input": True
                     }
                     
-                    print(f"AGX: Sending initial input data for source task {child_task.name} (index {task_index}) "
+                    print(f"Jetson: Sending initial input data for source task {child_task.name} (index {task_index}) "
                           f"to device {destination_device}")
                     self.pending_packets.append(comm_packet)
 
@@ -111,7 +111,7 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
         task_name = task.name
         if self.input_data[task_name] is True:
             # schedule
-            print(f"AGX: Schedule task {task_name} at logical time {lf.time.logical_elapsed()}")
+            print(f"Jetson: Schedule task {task_name} at logical time {lf.time.logical_elapsed()}")
             start_execution.schedule(0)
     =}
 
@@ -131,7 +131,7 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
             parent_task = packet.get("parent_task")
             task_name = child_task.name
             
-            print(f"AGX: Received output from parent task {parent_task.name if parent_task else 'unknown'} "
+            print(f"Jetson: Received output from parent task {parent_task.name if parent_task else 'unknown'} "
                   f"for child task {task_name}")
             
             # Mark that input data is ready for this child task
@@ -146,7 +146,7 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
                     if self.input_data[task_name] is True:
                         # Make sure we're at the right position or update current_task_index
                         if i == self.current_task_index:
-                            print(f"AGX: Scheduling task {task_name} at logical time {lf.time.logical_elapsed()}")
+                            print(f"Jetson: Scheduling task {task_name} at logical time {lf.time.logical_elapsed()}")
                             start_execution.schedule(0)
                         break
         else:
@@ -154,7 +154,7 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
             task = packet
             task_name = task.name
             if task_name in self.input_data and self.input_data[task_name] is True:
-                print(f"AGX: Schedule task {task_name} at logical time {lf.time.logical_elapsed()}")
+                print(f"Jetson: Schedule task {task_name} at logical time {lf.time.logical_elapsed()}")
                 start_execution.schedule(0)
     =}
 
@@ -165,23 +165,23 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
         # Keep execution deterministic for trace generation; do not tighten runtime deadline dynamically.
 
         task = self.task_queue[self.current_task_index]
-        print(f"MobileRobot: Execute task {task.name}")
-        print(f"MobileRobot: Tag = ({elapsed_logical_time}, {lf.tag().microstep}) and physical time = {elapsed_physicl_time}")
+        print(f"Jetson: Execute task {task.name}")
+        print(f"Jetson: Tag = ({elapsed_logical_time}, {lf.tag().microstep}) and physical time = {elapsed_physicl_time}")
         exec_time_ms = task.execution_times[self.device_index]
         time.sleep(exec_time_ms / 1000.0 / time_unit)
         # self.check_deadline()
-        print("MobileRobot: Schedule end_execution")
+        print("Jetson: Schedule end_execution")
         end_execution.schedule(MSEC(int(exec_time_ms)))
         # self.update_deadline(FOREVER)
     =} deadline(10 sec) {=
-        print("In AGX's deadline handler.")
+        print("In Jetson's deadline handler.")
         elapsed_logical_time = lf.time.logical_elapsed()
         elapsed_physicl_time = lf.time.physical_elapsed()
         print(f"Logical time = {elapsed_logical_time} and physical time = {elapsed_physicl_time}")
     =}
 
     reaction(end_execution) -> start_execution, send_packet, final_output, trace_output {=
-        print("In AGX: Send output data if needed.")
+        print("In Jetson: Send output data if needed.")
         # Get the completed task
         completed_task = self.task_queue[self.current_task_index]
         task_index = completed_task.index
@@ -234,7 +234,7 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
                     "output_size": output_size
                 }
                 
-                print(f"AGX: Task {completed_task.name} (index {task_index}) completed. "
+                print(f"Jetson: Task {completed_task.name} (index {task_index}) completed. "
                       f"Sending output to child task {child_task.name} (index {child_index}) "
                       f"on device {destination_device}")
                 self.pending_packets.append(comm_packet)
@@ -253,7 +253,7 @@ reactor MobileRobot(device_index = 0, device_name = "MobileRobot") {
         self.current_task_index += 1
 
         if self.current_task_index >= len(self.task_queue):
-            print(f"AGX: finish executing all scheduled tasks")
+            print(f"Jetson: finish executing all scheduled tasks")
             trace_output.set(self.trace_events)
         else:
             task = self.task_queue[self.current_task_index]
