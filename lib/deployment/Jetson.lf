@@ -3,8 +3,38 @@ target Python
 preamble {=
     import threading
     import time
+    from collections import deque
+    from dataclasses import dataclass, field
+    from typing import Deque, List, Tuple
 
     time_unit = 1
+
+    @dataclass
+    class Task:
+        name: str = ""
+        index: int = 0
+        deadline: int = -1
+        execution_times: List[int] = field(default_factory=list)
+        child_task_indexes: List[int] = field(default_factory=list, repr=False)
+        parent_task_indexes: List[int] = field(default_factory=list, repr=False)
+        input_size: int = 0
+        output_size: int = 0
+        source_device_index: int = 0
+        priority: float = 0
+        ready_time: int = -1
+        current_device: str = ""
+        communication_start_time: int = 0
+        communication_end_time: int = 0
+        computation_start_time: int = 0
+        computation_end_time: int = 0
+
+    @dataclass
+    class Device:
+        name: str = ""
+        index: int = 0
+        task_queue: Deque[Task] = field(default_factory=deque)
+        comm_channel_available: int = 0
+        comm_queue: list[Tuple[str, int, int]] = field(default_factory=list)
 
     def _apply_network_info(reactor, info):
         if not isinstance(info, dict):
