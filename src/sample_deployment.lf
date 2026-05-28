@@ -1401,7 +1401,7 @@ main reactor {
     s.task_chains -> r_1.task_chains, r_2.task_chains, r_3.task_chains
 
     r_1.send_edge -> r_2.recv_mobile_robot 
-    r_1.send_cloudlet -> r_3.recv_mobile_robot 
+    r_1.send_cloudlet -> r_3.recv_mobile_robot
     r_2.send_mobile_robot -> r_1.recv_edge 
     r_2.send_cloudlet -> r_3.recv_edge 
     r_3.send_mobile_robot -> r_1.recv_cloudlet 

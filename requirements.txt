@@ -1,6 +1,7 @@
 pandas
 matplotlib
-accelerate
-transformers
-tokenizers
-bitsandbytes>=0.43.0
+accelerate # LLM
+transformers # LLM
+tokenizers # LLM
+bitsandbytes>=0.43.0 # LLM
+ultralytics # ViT

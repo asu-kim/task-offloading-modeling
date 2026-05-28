@@ -1,6 +1,7 @@
 target Python
 
 preamble {=
+    import threading
     import time
 
     time_unit = 1
@@ -206,6 +207,8 @@ reactor Jetson(device_index = 0, device_name = "Jetson") {
     state trace_events = []
     state current_comp_start_time = 0.0
     state pending_packets = []
+    state compute_thread
+    state compute_error
 
     input network_info
     input task_chains
@@ -215,6 +218,7 @@ reactor Jetson(device_index = 0, device_name = "Jetson") {
     logical action start_execution
     logical action end_execution
     logical action send_packet
+    physical action compute_done
 
     output send_edge
     output send_cloudlet
@@ -234,9 +238,11 @@ reactor Jetson(device_index = 0, device_name = "Jetson") {
         self.completed_task_indexes = set()
         self.trace_events = []
         self.pending_packets = []
+        self.compute_thread = None
+        self.compute_error = None
     =}
 
-    reaction(start_execution) -> end_execution {=
+    reaction(start_execution) -> compute_done {=
         if self.current_packet is None:
             return
 
@@ -249,13 +255,36 @@ reactor Jetson(device_index = 0, device_name = "Jetson") {
         print(f"{self.device_name}: Tag = ({elapsed_logical_time}, {lf.tag().microstep}) "
               f"and physical time = {elapsed_physical_time}")
         exec_time_ms = task.execution_times[self.device_index]
-        time.sleep(exec_time_ms / 1000.0 / time_unit)
-        end_execution.schedule(MSEC(int(exec_time_ms)))
+
+        self.compute_error = None
+
+        def worker():
+            try:
+                # Keep simulated work off the reactor thread so sends and receives can proceed.
+                time.sleep(exec_time_ms / 1000.0 / time_unit)
+            except BaseException as exc:
+                self.compute_error = exc
+                print(f"{self.device_name}: Task {task.name} failed: {exc}", flush=True)
+            finally:
+                compute_done.schedule(0)
+
+        self.compute_thread = threading.Thread(target=worker, daemon=True)
+        self.compute_thread.start()
     =} deadline(10 sec) {=
         print(f"In {self.device_name}'s deadline handler.")
         elapsed_logical_time = lf.time.logical_elapsed()
         elapsed_physical_time = lf.time.physical_elapsed()
         print(f"Logical time = {elapsed_logical_time} and physical time = {elapsed_physical_time}")
+    =}
+
+    reaction(compute_done) -> end_execution {=
+        if self.current_packet is None:
+            return
+        self.compute_thread = None
+        if self.compute_error is not None:
+            request_stop()
+            return
+        end_execution.schedule(0)
     =}
 
     reaction(end_execution) -> start_execution, send_packet, final_output, trace_output {=
@@ -334,6 +363,8 @@ reactor Jetson(device_index = 0, device_name = "Jetson") {
         self.received_parent_indexes = {}
         self.completed_task_indexes = set()
         self.pending_packets = []
+        self.compute_thread = None
+        self.compute_error = None
 
         chains = task_chains.value if task_chains.is_present and isinstance(task_chains.value, list) else []
         print(f"{self.device_name}: Received {len(chains)} initial chain packet(s).")
