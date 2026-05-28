@@ -1,5 +1,5 @@
 target Python {
-    # coordination: decentralized
+    coordination: decentralized
 }
 
 import Jetson from "../lib/deployment/Jetson.lf"
@@ -26,7 +26,14 @@ preamble {=
 
     logger = logging.getLogger(__name__)
 
-    PROJECT_ROOT = Path(__file__).resolve().parents[2]
+    def _find_project_root():
+        current_file = Path(__file__).resolve()
+        for candidate in (current_file.parent, *current_file.parents):
+            if (candidate / "Bandwidth.csv").exists():
+                return candidate
+        return current_file.parents[2]
+
+    PROJECT_ROOT = _find_project_root()
 
     def project_path(*parts):
         return str(PROJECT_ROOT.joinpath(*parts))
@@ -1380,8 +1387,8 @@ reactor OutputVisualizer(bandwidth_csv_path = "Bandwidth.csv") {
     =}
 }
 
-main reactor {
-// federated reactor at 10.218.100.78 {
+// main reactor {
+federated reactor at 10.218.100.78 {
     s = new Scheduler()
     r_1 = new Jetson()
     r_2 = new A6000()
