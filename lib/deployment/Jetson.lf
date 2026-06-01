@@ -1,6 +1,7 @@
 target Python
 
 preamble {=
+    import pprint
     import threading
     import time
     from collections import deque
@@ -96,9 +97,55 @@ preamble {=
             "end_time": end_time_sec,
             "output_size": packet.get("payload_size", 0)
         })
+
+    def _task_snapshot(task):
+        if task is None:
+            return None
+        try:
+            return dict(vars(task))
+        except TypeError:
+            return str(task)
+
+    def _packet_snapshot(packet):
+        if not isinstance(packet, dict):
+            return packet
+
+        snapshot = {}
+        for key, value in packet.items():
+            if key in ["task", "parent_task"]:
+                snapshot[key] = _task_snapshot(value)
+            elif key == "continuations" and isinstance(value, list):
+                snapshot[key] = [
+                    {continuation_key: _task_snapshot(continuation_value) if continuation_key == "task" else continuation_value
+                     for continuation_key, continuation_value in continuation.items()}
+                    if isinstance(continuation, dict) else continuation
+                    for continuation in value
+                ]
+            else:
+                snapshot[key] = value
+        return snapshot
+
+    def _dummy_task_config(reactor, task):
+        return {
+            "device_name": reactor.device_name,
+            "device_index": reactor.device_index,
+            "execution_time_ms": task.execution_times[reactor.device_index],
+            "time_unit": time_unit,
+            "task_name": getattr(task, "name", None),
+            "task_index": getattr(task, "index", None),
+            "task_input_size": getattr(task, "input_size", None),
+            "task_output_size": getattr(task, "output_size", None),
+            "task_deadline": getattr(task, "deadline", None),
+        }
+
+    def _execute_dummy_task(reactor, task):
+        print(f"{reactor.device_name}: Dummy task for {task.name}", flush=True)
+        print(f"{reactor.device_name}: Dummy task configuration:\n{pprint.pformat(_dummy_task_config(reactor, task), sort_dicts=False)}", flush=True)
+        print(f"{reactor.device_name}: Dummy task input packet:\n{pprint.pformat(_packet_snapshot(reactor.current_packet), sort_dicts=False)}", flush=True)
+        print(f"{reactor.device_name}: Dummy task input task object:\n{pprint.pformat(_task_snapshot(task), sort_dicts=False)}", flush=True)
 =}
 
-reactor Jetson(device_index = 0, device_name = "Jetson") {
+reactor Jetson(device_index = 0, device_name = "Jetson", dummy_task = True) {
     state task_queue = []
     state current_packet
     state pending_task_packets
@@ -149,6 +196,16 @@ reactor Jetson(device_index = 0, device_name = "Jetson") {
         print(f"{self.device_name}: Tag = ({elapsed_logical_time}, {lf.tag().microstep}) "
               f"and physical time = {elapsed_physical_time}")
         exec_time_ms = task.execution_times[self.device_index]
+
+        if self.dummy_task:
+            try:
+                _execute_dummy_task(self, task)
+            except BaseException as exc:
+                print(f"{self.device_name}: Dummy task {task.name} failed: {exc}", flush=True)
+                request_stop()
+                return
+            compute_done.schedule(0)
+            return
 
         self.compute_error = None
 

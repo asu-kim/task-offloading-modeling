@@ -1,5 +1,5 @@
 target Python {
-    // coordination: decentralized
+    coordination: decentralized
 }
 
 import Jetson from "../lib/deployment/Jetson.lf"
@@ -1417,7 +1417,9 @@ reactor OutputVisualizer(bandwidth_csv_path = "Bandwidth.csv") {
 }
 
 // main reactor {
+// federated reactor at localhost {
 federated reactor at 10.218.100.78 {
+    @maxwait(forever)
     d = new TaskDistributor()
     r_1 = new Jetson()
     r_2 = new A6000()
@@ -1428,9 +1430,9 @@ federated reactor at 10.218.100.78 {
 
     e.change -> d.change
     e.network_info -> d.network_info
-    e.network_info -> r_1.network_info
-    e.network_info -> r_2.network_info
-    e.network_info -> r_3.network_info
+    // e.network_info -> r_1.network_info
+    // e.network_info -> r_2.network_info
+    // e.network_info -> r_3.network_info
 
     // v.csv_path -> d.csv_path
     d.task_chains -> r_1.task_chains, r_2.task_chains, r_3.task_chains

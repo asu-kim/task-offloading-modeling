@@ -2,6 +2,7 @@ target Python
 preamble {=
     import gc
     import os
+    import pprint
     import threading
     import time
     from collections import deque
@@ -121,6 +122,108 @@ preamble {=
     def _is_vit_task(task):
         task_name = getattr(task, "name", "")
         return isinstance(task_name, str) and task_name.upper().startswith("VIT")
+
+    def _task_snapshot(task):
+        if task is None:
+            return None
+        try:
+            return dict(vars(task))
+        except TypeError:
+            return str(task)
+
+    def _packet_snapshot(packet):
+        if not isinstance(packet, dict):
+            return packet
+
+        snapshot = {}
+        for key, value in packet.items():
+            if key == "task":
+                snapshot[key] = _task_snapshot(value)
+            elif key == "parent_task":
+                snapshot[key] = _task_snapshot(value)
+            elif key == "continuations" and isinstance(value, list):
+                continuation_snapshot = []
+                for continuation in value:
+                    if isinstance(continuation, dict):
+                        continuation_snapshot.append({
+                            continuation_key: _task_snapshot(continuation_value) if continuation_key == "task" else continuation_value
+                            for continuation_key, continuation_value in continuation.items()
+                        })
+                    else:
+                        continuation_snapshot.append(continuation)
+                snapshot[key] = continuation_snapshot
+            else:
+                snapshot[key] = value
+        return snapshot
+
+    def _dummy_llm_config(task):
+        return {
+            "model_id": os.environ.get("CLOUDLET_LLM_MODEL_ID", cloudlet_llm_default_model_id),
+            "max_new_tokens": int(os.environ.get("CLOUDLET_LLM_MAX_NEW_TOKENS", "24")),
+            "use_kv_cache": os.environ.get("CLOUDLET_LLM_USE_KV_CACHE", "0").lower() in ["1", "true", "yes"],
+            "disable_4bit": os.environ.get("CLOUDLET_LLM_DISABLE_4BIT", "0").lower() in ["1", "true", "yes"],
+            "question": getattr(task, "llm_question", None) or cloudlet_llm_default_question,
+        }
+
+    def _dummy_vit_config():
+        imgsz = _blackwell_yolo12_imgsz()
+        input_source, input_label = _blackwell_next_yolo12_input(imgsz)
+        return {
+            "weights": os.environ.get("BLACKWELL_YOLO12_WEIGHTS", blackwell_yolo12_default_weights),
+            "engine": os.environ.get("BLACKWELL_YOLO12_ENGINE", blackwell_yolo12_default_engine),
+            "device": _blackwell_yolo12_device(),
+            "confidence": _blackwell_yolo12_conf(),
+            "imgsz": imgsz,
+            "half": _blackwell_yolo12_half(),
+            "disable_trt_export": _blackwell_yolo12_disable_trt_export(),
+            "image_folder": os.environ.get("BLACKWELL_YOLO12_IMAGE_FOLDER", blackwell_yolo12_default_image_folder),
+            "input_source": str(input_source),
+            "input_label": input_label,
+        }
+
+    def _execute_dummy_ml_task(reactor, task, task_kind):
+        packet_snapshot = _packet_snapshot(reactor.current_packet)
+        task_snapshot = _task_snapshot(task)
+        if task_kind == "llm":
+            config = _dummy_llm_config(task)
+            task.llm_question = config["question"]
+            task.llm_answer = f"dummy-answer-for-{task.name}"
+            task.llm_inference_ms = 0
+            reactor.llm_results[task.index] = {
+                "question": task.llm_question,
+                "answer": task.llm_answer,
+                "inference_ms": 0,
+                "dummy_task": True,
+            }
+            if reactor.current_packet is not None:
+                reactor.current_packet["llm_question"] = task.llm_question
+                reactor.current_packet["llm_answer"] = task.llm_answer
+                reactor.current_packet["llm_inference_ms"] = 0
+        elif task_kind == "vit":
+            config = _dummy_vit_config()
+            task.yolo12_input = config["input_label"]
+            task.yolo12_inference_ms = 0
+            task.yolo12_speed = {"dummy": 0}
+            task.yolo12_detection_count = 0
+            reactor.yolo_results[task.index] = {
+                "input": task.yolo12_input,
+                "inference_ms": 0,
+                "speed": task.yolo12_speed,
+                "detections": task.yolo12_detection_count,
+                "dummy_task": True,
+            }
+            if reactor.current_packet is not None:
+                reactor.current_packet["yolo12_input"] = task.yolo12_input
+                reactor.current_packet["yolo12_inference_ms"] = 0
+                reactor.current_packet["yolo12_speed"] = task.yolo12_speed
+                reactor.current_packet["yolo12_detection_count"] = task.yolo12_detection_count
+        else:
+            config = {}
+
+        print(f"{reactor.device_name}: Dummy ML task for {task.name} ({task_kind})", flush=True)
+        print(f"{reactor.device_name}: Dummy task configuration:\n{pprint.pformat(config, sort_dicts=False)}", flush=True)
+        print(f"{reactor.device_name}: Dummy task input packet:\n{pprint.pformat(packet_snapshot, sort_dicts=False)}", flush=True)
+        print(f"{reactor.device_name}: Dummy task input task object:\n{pprint.pformat(task_snapshot, sort_dicts=False)}", flush=True)
 
     def _blackwell_project_root():
         try:
@@ -421,7 +524,7 @@ preamble {=
 
 =}
 
-reactor Blackwell(device_index = 2, device_name = "Blackwell", dataflow_model=1) {
+reactor Blackwell(device_index = 2, device_name = "Blackwell", dummy_task = True) {
     state task_queue = []
     state current_packet
     state pending_task_packets
@@ -477,6 +580,16 @@ reactor Blackwell(device_index = 2, device_name = "Blackwell", dataflow_model=1)
               f"and physical time = {elapsed_physical_time}")
         exec_time_ms = task.execution_times[self.device_index]
         if _is_llm_task(task):
+            if self.dummy_task:
+                try:
+                    _execute_dummy_ml_task(self, task, "llm")
+                except BaseException as exc:
+                    print(f"{self.device_name}: Dummy LLM task {task.name} failed: {exc}", flush=True)
+                    request_stop()
+                    return
+                end_execution.schedule(0)
+                return
+
             self.llm_error = None
 
             def worker():
@@ -492,7 +605,10 @@ reactor Blackwell(device_index = 2, device_name = "Blackwell", dataflow_model=1)
             self.llm_thread.start()
         elif _is_vit_task(task):
             try:
-                _execute_blackwell_yolo12_task(self, task)
+                if self.dummy_task:
+                    _execute_dummy_ml_task(self, task, "vit")
+                else:
+                    _execute_blackwell_yolo12_task(self, task)
             except BaseException as exc:
                 print(f"{self.device_name}: YOLO12 task {task.name} failed: {exc}", flush=True)
                 request_stop()
