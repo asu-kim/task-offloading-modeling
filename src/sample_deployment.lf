@@ -1256,16 +1256,19 @@ reactor OutputVisualizer(bandwidth_csv_path = "Bandwidth.csv") {
             trace_by_device[2] = r3_trace.value
         self.received_traces = list(trace_by_device.items())
 
-        if len(trace_by_device) != 3:
-            return
-        if len(self.completed_task_indexes) < self.total_task_count:
-            return
-
-        self.plotted = True
         all_events = (trace_by_device.get(0, []) + trace_by_device.get(1, []) + trace_by_device.get(2, []))
 
         comp_events = [e for e in all_events if e.get("type") == "comp"]
         comm_events = [e for e in all_events if e.get("type") == "comm_send"]
+        traced_task_ids = {
+            e.get("task_index", e.get("task_name"))
+            for e in comp_events
+            if e.get("task_index", e.get("task_name")) is not None
+        }
+        if len(traced_task_ids) < self.total_task_count:
+            return
+
+        self.plotted = True
 
         # Always show all three devices (indices 0,1,2). HE may assign no work to one of them;
         # previously we only listed devices with comp events, which hid idle devices like Blackwell.
@@ -1419,13 +1422,14 @@ reactor OutputVisualizer(bandwidth_csv_path = "Bandwidth.csv") {
 // main reactor {
 // federated reactor at localhost {
 federated reactor at 10.218.100.78 {
-    @maxwait(forever)
+    @maxwait(5 sec)
     d = new TaskDistributor()
     r_1 = new Jetson()
     r_2 = new A6000()
     r_3 = new Blackwell()
     
     e = new EnvironmentUpdateDetector()
+    @maxwait(5 sec)
     o = new OutputVisualizer()
 
     e.change -> d.change

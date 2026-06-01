@@ -252,6 +252,7 @@ reactor Jetson(device_index = 0, device_name = "Jetson", dummy_task = True) {
 
         self.trace_events.append({
             "type": "comp",
+            "task_index": task_index,
             "task_name": completed_task.name,
             "device_index": self.device_index,
             "device_name": self.device_name,

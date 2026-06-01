@@ -223,6 +223,7 @@ reactor A6000(device_index = 1, device_name = "A6000", dummy_task = True) {
 
         self.trace_events.append({
             "type": "comp",
+            "task_index": task_index,
             "task_name": completed_task.name,
             "device_index": self.device_index,
             "device_name": self.device_name,
