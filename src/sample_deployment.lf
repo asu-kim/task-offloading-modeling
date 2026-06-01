@@ -1,5 +1,5 @@
 target Python {
-    coordination: decentralized
+    // coordination: decentralized
 }
 
 import Jetson from "../lib/deployment/Jetson.lf"

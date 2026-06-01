@@ -1,6 +1,7 @@
 target Python
 
 preamble {=
+    import math
     import threading
     import time
     from collections import deque
@@ -8,6 +9,17 @@ preamble {=
     from typing import Deque, List, Tuple
 
     time_unit = 1
+
+    def transfer_time_ms(data_size_mb: float, bandwidth_mb_per_sec: int) -> int:
+        if data_size_mb == 0 or bandwidth_mb_per_sec == 0:
+            return 0
+        return int(math.ceil(float(data_size_mb) / float(bandwidth_mb_per_sec)))
+
+    network_available_sec = 0.0
+
+    def reset_network_serialization():
+        global network_available_sec
+        network_available_sec = 0.0
 
     @dataclass
     class Task:
