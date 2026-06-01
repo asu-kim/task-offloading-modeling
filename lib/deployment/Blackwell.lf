@@ -1,7 +1,6 @@
 target Python
 preamble {=
     import gc
-    import math
     import os
     import threading
     import time
@@ -10,17 +9,6 @@ preamble {=
     from typing import Deque, List, Tuple
 
     time_unit = 1
-
-    def transfer_time_ms(data_size_mb: float, bandwidth_mb_per_sec: int) -> int:
-        if data_size_mb == 0 or bandwidth_mb_per_sec == 0:
-            return 0
-        return int(math.ceil(float(data_size_mb) / float(bandwidth_mb_per_sec)))
-
-    network_available_sec = 0.0
-
-    def reset_network_serialization():
-        global network_available_sec
-        network_available_sec = 0.0
 
     @dataclass
     class Task:
@@ -64,90 +52,6 @@ preamble {=
     _blackwell_yolo12_image_paths = []
     _blackwell_yolo12_image_index = 0
     _blackwell_yolo12_lock = threading.Lock()
-
-    def _apply_network_info(reactor, info):
-        if not isinstance(info, dict):
-            return
-        reactor.bandwidth = info.get("bandwidth", [])
-        reactor.latency = info.get("latency", [])
-
-    def _network_receiver_delay_ms(reactor, packet):
-        if not isinstance(packet, dict):
-            return 0
-
-        sender_device = packet.get("sender_device")
-        receiver_device = reactor.receiver_device_index
-        payload_size = packet.get("payload_size", 0)
-
-        latency_ms = 0
-        bandwidth = 0
-        try:
-            if sender_device is not None:
-                latency_ms = reactor.latency[sender_device][receiver_device]
-                bandwidth = reactor.bandwidth[sender_device][receiver_device]
-        except (IndexError, TypeError):
-            latency_ms = 0
-            bandwidth = 0
-
-        transfer_ms = transfer_time_ms(payload_size, bandwidth) if bandwidth > 0 else 0
-        return int(latency_ms) + int(transfer_ms)
-
-    def _queue_network_receiver_packet(reactor, source_name, packet, delay_action):
-        global network_available_sec
-        try:
-            network_available_sec
-        except NameError:
-            network_available_sec = 0.0
-
-        if not isinstance(packet, dict):
-            return
-
-        now_sec = lf.time.logical_elapsed() / 1e9
-        trace_now_sec = lf.time.physical_elapsed() / 1e9
-        delay_ms = _network_receiver_delay_ms(reactor, packet)
-        network_start_sec = max(now_sec, network_available_sec)
-        network_end_sec = network_start_sec + (float(delay_ms) / 1000.0)
-        network_available_sec = network_end_sec
-
-        packet["network_start_time_sec"] = network_start_sec
-        packet["network_end_time_sec"] = network_end_sec
-        packet["network_trace_start_time_sec"] = packet.get("sent_time_sec", trace_now_sec)
-        packet["network_trace_end_time_sec"] = trace_now_sec
-
-        pending = reactor.pending_packets.setdefault(source_name, [])
-        pending.append(packet)
-        pending.sort(key=lambda pending_packet: pending_packet["network_end_time_sec"])
-
-        wait_ms = max(0, int((network_end_sec - now_sec) * 1000.0 + 0.999999))
-        # delay_action.schedule(MSEC(wait_ms))
-        delay_action.schedule(0)
-        task = packet.get("task")
-        task_name = task.name if task is not None else "unknown"
-        print(f"{reactor.receiver_device_name}: Queued network delivery for task {task_name} "
-              f"from {network_start_sec * 1000.0:.1f} ms to {network_end_sec * 1000.0:.1f} ms")
-
-    def _pop_ready_network_receiver_packet(reactor, source_name, delay_action):
-        now_sec = lf.time.logical_elapsed() / 1e9
-        pending = reactor.pending_packets.setdefault(source_name, [])
-        pending.sort(key=lambda packet: packet["network_end_time_sec"])
-
-        if len(pending) == 0:
-            return None
-
-        packet = pending[0]
-        if packet["network_end_time_sec"] > now_sec + 1e-9:
-            wait_ms = max(1, int((packet["network_end_time_sec"] - now_sec) * 1000.0 + 0.999999))
-            delay_action.schedule(MSEC(wait_ms))
-            return None
-
-        packet = pending.pop(0)
-        packet["network_trace_end_time_sec"] = lf.time.physical_elapsed() / 1e9
-        if len(pending) > 0:
-            next_packet = pending[0]
-            wait_ms = max(0, int((next_packet["network_end_time_sec"] - now_sec) * 1000.0 + 0.999999))
-            delay_action.schedule(MSEC(wait_ms))
-
-        return packet
 
     def _accept_chain_packet(reactor, packet):
         if not isinstance(packet, dict) or "task" not in packet or "device" not in packet:
@@ -517,53 +421,7 @@ preamble {=
 
 =}
 
-reactor CloudletNetworkReceiver(receiver_device_index = 2, receiver_device_name = "Blackwell") {
-    state pending_packets
-    state bandwidth = []
-    state latency = []
-
-    input network_info
-    input recv_mobile_robot
-    input recv_edge
-
-    logical action comm_delay_mobile_robot
-    logical action comm_delay_edge
-
-    output forward_mobile_robot
-    output forward_edge
-
-    reaction(startup) {=
-        self.pending_packets = {"mobile_robot": [], "edge": []}
-        self.bandwidth = []
-        self.latency = []
-    =}
-
-    reaction(network_info) {=
-        _apply_network_info(self, network_info.value)
-    =}
-
-    reaction(recv_mobile_robot, recv_edge) -> comm_delay_mobile_robot, comm_delay_edge {=
-        if recv_mobile_robot.is_present:
-            _queue_network_receiver_packet(self, "mobile_robot", recv_mobile_robot.value, comm_delay_mobile_robot)
-
-        if recv_edge.is_present:
-            _queue_network_receiver_packet(self, "edge", recv_edge.value, comm_delay_edge)
-    =}
-
-    reaction(comm_delay_mobile_robot) -> forward_mobile_robot {=
-        packet = _pop_ready_network_receiver_packet(self, "mobile_robot", comm_delay_mobile_robot)
-        if packet is not None:
-            forward_mobile_robot.set(packet)
-    =}
-
-    reaction(comm_delay_edge) -> forward_edge {=
-        packet = _pop_ready_network_receiver_packet(self, "edge", comm_delay_edge)
-        if packet is not None:
-            forward_edge.set(packet)
-    =}
-}
-
-reactor Blackwell(device_index = 2, device_name = "Blackwell") {
+reactor Blackwell(device_index = 2, device_name = "Blackwell", dataflow_model=1) {
     state task_queue = []
     state current_packet
     state pending_task_packets
@@ -577,7 +435,6 @@ reactor Blackwell(device_index = 2, device_name = "Blackwell") {
     state llm_thread
     state llm_error
 
-    input network_info
     input task_chains
     input recv_mobile_robot
     input recv_edge
@@ -591,11 +448,6 @@ reactor Blackwell(device_index = 2, device_name = "Blackwell") {
     output send_edge
     output final_output
     output trace_output
-
-    nr = new CloudletNetworkReceiver()
-    network_info -> nr.network_info
-    recv_mobile_robot -> nr.recv_mobile_robot
-    recv_edge -> nr.recv_edge
 
     reaction(startup) {=
         self.task_queue = []
@@ -771,12 +623,12 @@ reactor Blackwell(device_index = 2, device_name = "Blackwell") {
         trace_output.set(self.trace_events)
     =}
 
-    reaction(nr.forward_mobile_robot, nr.forward_edge) -> start_execution, send_packet {=
+    reaction(recv_mobile_robot, recv_edge) -> start_execution, send_packet {=
         packets = []
-        if nr.forward_mobile_robot.is_present:
-            packets.append(nr.forward_mobile_robot.value)
-        if nr.forward_edge.is_present:
-            packets.append(nr.forward_edge.value)
+        if recv_mobile_robot.is_present:
+            packets.append(recv_mobile_robot.value)
+        if recv_edge.is_present:
+            packets.append(recv_edge.value)
 
         for packet in packets:
             if isinstance(packet, dict) and packet.get("device") == self.device_index:

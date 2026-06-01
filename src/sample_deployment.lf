@@ -1050,6 +1050,24 @@ preamble {=
         return job_assignments.copy()
 =}
 
+reactor TaskSetSource {
+    output tasks
+
+    reaction(startup) -> tasks {=
+        task_csv_path = project_path("Tasks.csv")
+        dependency_csv_path = project_path("Dependencies.csv")
+
+        # Read the CSVs here so the scheduler receives a validated task-set descriptor.
+        pd.read_csv(task_csv_path)
+        pd.read_csv(dependency_csv_path, header=0, index_col=None)
+
+        tasks.set({
+            "task_csv_path": task_csv_path,
+            "dependency_csv_path": dependency_csv_path
+        })
+    =}
+}
+
 reactor Scheduler {
     preamble {=
     =}
@@ -1061,16 +1079,20 @@ reactor Scheduler {
     state dev_mobile = [0, [], [], []]  # Jetson device_index 0
     state dev_edge = [1, [], [], []]    # A6000 device_index 1
     state dev_cloud = [2, [], [], []]  # Blackwell device_index 2
+    state task_set = []
     // state tasks = [[0, 6, [4, 3, 2], 4, 4], [1, 10, [8, 5, 4], 4, 1]] # [index, deadline, [exec_time on Jetson, A6000, Blackwell], input_size, output_size]
     // state bandwidth = [[0, 2, 5], [2, 0, 3], [5, 3, 0]] # link rates (MB/s) between devices
     output[3] task_chains
 
     reaction(change, tasks, network_info) -> task_chains {=
-        if not network_info.is_present:
+        if tasks.is_present:
+            self.task_set = tasks.value
+
+        if len(self.task_set) == 0 or not network_info.is_present:
             return
 
-        task_csv_path = project_path("Tasks.csv")
-        dependency_csv_path = project_path("Dependencies.csv")
+        task_csv_path = self.task_set["task_csv_path"]
+        dependency_csv_path = self.task_set["dependency_csv_path"]
         network_info_value = network_info.value
 
         system = System(task_csv_path=task_csv_path, 
@@ -1124,6 +1146,21 @@ reactor Scheduler {
     =}
 }
 
+reactor TaskDistributor {
+    input change
+    input network_info
+
+    output[3] task_chains
+
+    t = new TaskSetSource()
+    s = new Scheduler()
+
+    t.tasks -> s.tasks
+    change -> s.change
+    network_info -> s.network_info
+    s.task_chains -> task_chains
+}
+
 reactor EnvironmentUpdateDetector {
     // timer t(0, 10 sec)
     output change
@@ -1156,14 +1193,6 @@ reactor EnvironmentUpdateDetector {
             "latency": latency
         })
         change.set(True)
-    =}
-}
-
-reactor TaskSetSource {
-    // timer t(0, 20 sec)
-    output tasks
-    reaction(startup) -> tasks {=
-        
     =}
 }
 
@@ -1389,23 +1418,22 @@ reactor OutputVisualizer(bandwidth_csv_path = "Bandwidth.csv") {
 
 // main reactor {
 federated reactor at 10.218.100.78 {
-    s = new Scheduler()
+    d = new TaskDistributor()
     r_1 = new Jetson()
     r_2 = new A6000()
     r_3 = new Blackwell()
     
-    t = new TaskSetSource()
     e = new EnvironmentUpdateDetector()
     o = new OutputVisualizer()
 
-    t.tasks, e.change -> s.tasks, s.change
-    e.network_info -> s.network_info
+    e.change -> d.change
+    e.network_info -> d.network_info
     e.network_info -> r_1.network_info
     e.network_info -> r_2.network_info
     e.network_info -> r_3.network_info
 
-    // v.csv_path -> s.csv_path
-    s.task_chains -> r_1.task_chains, r_2.task_chains, r_3.task_chains
+    // v.csv_path -> d.csv_path
+    d.task_chains -> r_1.task_chains, r_2.task_chains, r_3.task_chains
 
     r_1.send_edge -> r_2.recv_mobile_robot 
     r_1.send_cloudlet -> r_3.recv_mobile_robot
