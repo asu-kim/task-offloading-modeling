@@ -17,4 +17,13 @@ pip install pandas
 Use logical delay to emulate communication cost
 
 ## Deployment
-Use physical connection
+
+### A6000
+```
+./my_env/bin/python3.10 -m pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision
+```
+
+
+```
+export PYTHONPATH="$PWD/my_env/lib/python3.10/site-packages:$PYTHONPATH"
+```
