@@ -1,0 +1,444 @@
+target Python
+preamble {=
+    import os
+    import threading
+    import time
+
+    blackwell_yolos_default_engine = "yolos_small_fp16.engine"
+    blackwell_yolos_default_hf_model = "hustvl/yolos-small"
+    blackwell_yolos_default_image_folder = "dataset128/coco128/images/train2017"
+    _blackwell_yolos_runner = None
+    _blackwell_yolos_image_paths = []
+    _blackwell_yolos_image_index = 0
+    _blackwell_yolos_lock = threading.Lock()
+
+    def _blackwell_project_root():
+        roots = [os.getcwd()]
+        try:
+            roots.append(os.path.dirname(os.path.abspath(__file__)))
+        except NameError:
+            pass
+
+        for root in roots:
+            current = os.path.abspath(root)
+            while True:
+                if (
+                    os.path.isdir(os.path.join(current, "profiling-reference"))
+                    and os.path.isdir(os.path.join(current, "lib"))
+                ):
+                    return current
+                parent = os.path.dirname(current)
+                if parent == current:
+                    break
+                current = parent
+
+        return os.getcwd()
+
+    def _blackwell_tensor_rt_reference_dir():
+        return os.path.join(
+            _blackwell_project_root(),
+            "profiling-reference",
+            "profiling-scheduler-cps-intelligent-system",
+            "codes_2026",
+            "tensor_rt",
+        )
+
+    def _blackwell_resolve_path(path_value):
+        path_text = str(path_value).strip()
+        expanded = os.path.expanduser(path_text)
+        if os.path.isabs(expanded):
+            return expanded
+
+        for root in [os.getcwd(), _blackwell_project_root(), _blackwell_tensor_rt_reference_dir()]:
+            candidate = os.path.abspath(os.path.join(root, expanded))
+            if os.path.exists(candidate):
+                return candidate
+        return os.path.abspath(os.path.join(_blackwell_project_root(), expanded))
+
+    def _blackwell_yolos_hf_model():
+        return os.environ.get("BLACKWELL_YOLOS_HF_MODEL", blackwell_yolos_default_hf_model)
+
+    def _blackwell_yolos_engine():
+        default_engine = blackwell_yolos_default_engine
+        hf_model = _blackwell_yolos_hf_model()
+        precision = os.environ.get("BLACKWELL_YOLOS_PRECISION", "fp16").lower()
+        if hf_model == "hustvl/yolos-base":
+            default_engine = f"yolos_base_{precision}.engine"
+        elif hf_model == "hustvl/yolos-small":
+            default_engine = f"yolos_small_{precision}.engine"
+        return os.environ.get("BLACKWELL_YOLOS_ENGINE", default_engine)
+
+    def _blackwell_yolos_device():
+        device = os.environ.get("BLACKWELL_YOLOS_DEVICE", "cuda:0")
+        if device.isdigit():
+            return f"cuda:{device}"
+        return device
+
+    def _blackwell_yolos_conf():
+        return float(os.environ.get("BLACKWELL_YOLOS_CONF", "0.3"))
+
+    def _blackwell_yolos_imgsz():
+        return int(os.environ.get("BLACKWELL_YOLOS_IMGSZ", "640"))
+
+    def _blackwell_yolos_backend():
+        return os.environ.get("BLACKWELL_YOLOS_BACKEND", "auto").lower()
+
+    def _blackwell_find_yolos_images():
+        image_folder = os.environ.get("BLACKWELL_YOLOS_IMAGE_FOLDER", blackwell_yolos_default_image_folder)
+        folder = _blackwell_resolve_path(image_folder)
+        if not os.path.isdir(folder):
+            return []
+
+        paths = []
+        for root, _, files in os.walk(folder):
+            for name in files:
+                if name.lower().endswith((".jpg", ".jpeg", ".png", ".bmp")):
+                    paths.append(os.path.join(root, name))
+        paths.sort()
+        return paths
+
+    def _blackwell_yolos_detection_limit():
+        return int(os.environ.get("BLACKWELL_YOLOS_PRINT_TOPK", "5"))
+
+    def _blackwell_format_yolos_detections(detection, id2label):
+        details = []
+        if not detection:
+            return details
+
+        scores = detection["scores"].detach().cpu().tolist()
+        labels = detection["labels"].detach().cpu().tolist()
+        boxes = detection["boxes"].detach().cpu().tolist()
+        for score, label_id, box in zip(scores, labels, boxes):
+            details.append({
+                "label": id2label.get(int(label_id), str(int(label_id))),
+                "score": round(float(score), 4),
+                "box": [round(float(value), 2) for value in box],
+            })
+        return details[:_blackwell_yolos_detection_limit()]
+
+    def _blackwell_next_yolos_input(imgsz):
+        global _blackwell_yolos_image_index
+
+        if len(_blackwell_yolos_image_paths) == 0:
+            return None, "synthetic-zero-image"
+
+        path = _blackwell_yolos_image_paths[_blackwell_yolos_image_index % len(_blackwell_yolos_image_paths)]
+        _blackwell_yolos_image_index += 1
+        return path, path
+
+    class _BlackwellYolosTorchRunner:
+        def __init__(self, hf_model, imgsz, conf, device):
+            import torch
+            from PIL import Image
+            from transformers import YolosForObjectDetection, YolosImageProcessor
+
+            self.torch = torch
+            self.Image = Image
+            self.processor = YolosImageProcessor.from_pretrained(hf_model)
+            self.model = YolosForObjectDetection.from_pretrained(hf_model).to(device).eval()
+            self.id2label = self.model.config.id2label
+            self.imgsz = imgsz
+            self.conf = conf
+            self.device = device
+            self.backend = "PyTorch"
+            self.source = hf_model
+
+        def _read_image(self, path):
+            if path is None:
+                return self.Image.new("RGB", (self.imgsz, self.imgsz), color=(0, 0, 0))
+            return self.Image.open(path).convert("RGB")
+
+        def infer(self, path):
+            image = self._read_image(path)
+            w0, h0 = image.size
+
+            start_ns = time.perf_counter_ns()
+            inputs = self.processor(
+                images=image,
+                size={"height": self.imgsz, "width": self.imgsz},
+                return_tensors="pt",
+            )
+            inputs = {name: value.to(self.device) for name, value in inputs.items()}
+            if self.device.startswith("cuda"):
+                self.torch.cuda.synchronize()
+            with self.torch.inference_mode():
+                outputs = self.model(**inputs)
+            if self.device.startswith("cuda"):
+                self.torch.cuda.synchronize()
+            detections = self.processor.post_process_object_detection(
+                outputs,
+                threshold=self.conf,
+                target_sizes=self.torch.tensor([[h0, w0]], device=self.device),
+            )
+            end_ns = time.perf_counter_ns()
+
+            return {
+                "inference_ms": int((end_ns - start_ns) / 1_000_000),
+                "detections": len(detections[0]["scores"]) if detections else 0,
+                "details": _blackwell_format_yolos_detections(detections[0] if detections else None, self.id2label),
+                "speed": {},
+            }
+
+    class _BlackwellYolosTensorRTRunner:
+        def __init__(self, engine_path, hf_model, imgsz, conf):
+            import numpy as np
+            import tensorrt as trt
+            import torch
+            from cuda.bindings import driver as cuda
+            from PIL import Image
+            from transformers import AutoConfig, YolosImageProcessor
+
+            self.np = np
+            self.trt = trt
+            self.torch = torch
+            self.cuda = cuda
+            self.Image = Image
+            self.processor = YolosImageProcessor.from_pretrained(hf_model)
+            self.id2label = AutoConfig.from_pretrained(hf_model).id2label
+            self.imgsz = imgsz
+            self.conf = conf
+            self.backend = "TensorRT"
+            self.source = engine_path
+
+            self._cuda_check(cuda.cuInit(0)[0])
+            logger = trt.Logger(trt.Logger.WARNING)
+            runtime = trt.Runtime(logger)
+            with open(engine_path, "rb") as f:
+                self.engine = runtime.deserialize_cuda_engine(f.read())
+            if self.engine is None:
+                raise RuntimeError(f"Failed to load YOLOS TensorRT engine: {engine_path}")
+
+            self.context = self.engine.create_execution_context()
+            if self.context is None:
+                raise RuntimeError(f"Failed to create TensorRT context: {engine_path}")
+
+            self.input_name = None
+            self.output_names = []
+            for i in range(self.engine.num_io_tensors):
+                name = self.engine.get_tensor_name(i)
+                mode = self.engine.get_tensor_mode(name)
+                if mode == trt.TensorIOMode.INPUT:
+                    self.input_name = name
+                else:
+                    self.output_names.append(name)
+            if self.input_name is None:
+                raise RuntimeError("YOLOS TensorRT engine has no input tensor")
+
+            input_shape = tuple(self.engine.get_tensor_shape(self.input_name))
+            if any(d == -1 for d in input_shape):
+                input_shape = (1, 3, imgsz, imgsz)
+                ok = self.context.set_input_shape(self.input_name, input_shape)
+                if not ok:
+                    raise RuntimeError(f"Failed to set TensorRT input shape: {input_shape}")
+
+            self.input_dtype = trt.nptype(self.engine.get_tensor_dtype(self.input_name))
+            self.dptrs = {}
+            self.host_bufs = {}
+            self.output_shapes = {}
+
+            input_nbytes = int(np.prod(input_shape)) * np.dtype(self.input_dtype).itemsize
+            self.dptrs[self.input_name] = self._malloc(input_nbytes)
+            self.context.set_tensor_address(self.input_name, self.dptrs[self.input_name])
+
+            for name in self.output_names:
+                shape = tuple(self.context.get_tensor_shape(name))
+                if any(d < 0 for d in shape):
+                    raise RuntimeError(f"Dynamic output shape unresolved for {name}: {shape}")
+                dtype = trt.nptype(self.engine.get_tensor_dtype(name))
+                self.output_shapes[name] = shape
+                self.host_bufs[name] = np.empty(shape, dtype=dtype)
+                self.dptrs[name] = self._malloc(self.host_bufs[name].nbytes)
+                self.context.set_tensor_address(name, self.dptrs[name])
+
+            self.logits_name, self.boxes_name = self._find_yolos_outputs(self.output_shapes)
+            err, self.stream = cuda.cuStreamCreate(0)
+            self._cuda_check(err)
+
+        def _cuda_check(self, err):
+            if err != self.cuda.CUresult.CUDA_SUCCESS:
+                raise RuntimeError(f"CUDA error: {err}")
+
+        def _malloc(self, nbytes):
+            err, ptr = self.cuda.cuMemAlloc(nbytes)
+            self._cuda_check(err)
+            return int(ptr)
+
+        def _find_yolos_outputs(self, output_shapes):
+            logits_name = None
+            boxes_name = None
+            for name, shape in output_shapes.items():
+                if len(shape) != 3:
+                    continue
+                if shape[1] == 100 and shape[2] == 4:
+                    boxes_name = name
+                elif shape[1] == 100 and shape[2] > 4:
+                    logits_name = name
+            if logits_name is None or boxes_name is None:
+                raise RuntimeError(f"Could not identify YOLOS outputs from: {output_shapes}")
+            return logits_name, boxes_name
+
+        def _read_image(self, path):
+            if path is None:
+                return self.Image.new("RGB", (self.imgsz, self.imgsz), color=(0, 0, 0))
+            return self.Image.open(path).convert("RGB")
+
+        def infer(self, path):
+            image = self._read_image(path)
+            w0, h0 = image.size
+
+            start_ns = time.perf_counter_ns()
+            inputs = self.processor(
+                images=image,
+                size={"height": self.imgsz, "width": self.imgsz},
+                return_tensors="pt",
+            )
+            x = inputs["pixel_values"].cpu().numpy().astype(self.input_dtype, copy=False)
+            x = self.np.ascontiguousarray(x)
+
+            err, = self.cuda.cuMemcpyHtoD(self.dptrs[self.input_name], x.ctypes.data, x.nbytes)
+            self._cuda_check(err)
+            ok = self.context.execute_async_v3(stream_handle=self.stream)
+            if not ok:
+                raise RuntimeError("YOLOS TensorRT inference failed")
+            for out_name in self.output_names:
+                err, = self.cuda.cuMemcpyDtoH(
+                    self.host_bufs[out_name].ctypes.data,
+                    self.dptrs[out_name],
+                    self.host_bufs[out_name].nbytes,
+                )
+                self._cuda_check(err)
+            err, = self.cuda.cuStreamSynchronize(self.stream)
+            self._cuda_check(err)
+
+            logits_t = self.torch.from_numpy(self.host_bufs[self.logits_name].copy())
+            boxes_t = self.torch.from_numpy(self.host_bufs[self.boxes_name].copy())
+            outputs = type("YolosOutput", (), {"logits": logits_t, "pred_boxes": boxes_t})()
+            detections = self.processor.post_process_object_detection(
+                outputs,
+                threshold=self.conf,
+                target_sizes=self.torch.tensor([[h0, w0]]),
+            )
+            end_ns = time.perf_counter_ns()
+
+            return {
+                "inference_ms": int((end_ns - start_ns) / 1_000_000),
+                "detections": len(detections[0]["scores"]) if detections else 0,
+                "details": _blackwell_format_yolos_detections(detections[0] if detections else None, self.id2label),
+                "speed": {},
+            }
+
+        def warmup(self, path, count):
+            for _ in range(max(0, count)):
+                self.infer(path)
+
+    def _load_blackwell_yolos():
+        global _blackwell_yolos_runner
+        global _blackwell_yolos_image_paths
+
+        if _blackwell_yolos_runner is not None:
+            return _blackwell_yolos_runner
+
+        hf_model = _blackwell_yolos_hf_model()
+        imgsz = _blackwell_yolos_imgsz()
+        conf = _blackwell_yolos_conf()
+        backend = _blackwell_yolos_backend()
+        engine_path = _blackwell_resolve_path(_blackwell_yolos_engine())
+        use_trt = backend in ["auto", "trt", "tensorrt"] and os.path.exists(engine_path)
+
+        _blackwell_yolos_image_paths = _blackwell_find_yolos_images()
+        sample_input, _ = _blackwell_next_yolos_input(imgsz)
+
+        if use_trt:
+            runner = _BlackwellYolosTensorRTRunner(engine_path, hf_model, imgsz, conf)
+        elif backend in ["trt", "tensorrt"]:
+            raise RuntimeError(f"BLACKWELL_YOLOS_BACKEND={backend}, but engine was not found: {engine_path}")
+        else:
+            device = _blackwell_yolos_device()
+            runner = _BlackwellYolosTorchRunner(hf_model, imgsz, conf, device)
+
+        warmup = int(os.environ.get("BLACKWELL_YOLOS_WARMUP", "1"))
+        for _ in range(max(0, warmup)):
+            runner.infer(sample_input)
+
+        print(
+            f"Blackwell: YOLOS model ready from {runner.source}; backend={runner.backend}, "
+            f"hf_model={hf_model}, images={len(_blackwell_yolos_image_paths)}",
+            flush=True,
+        )
+        _blackwell_yolos_runner = runner
+        return _blackwell_yolos_runner
+
+    def _execute_blackwell_yolos_task(reactor, input_image=None):
+        with _blackwell_yolos_lock:
+            runner = _load_blackwell_yolos()
+            imgsz = _blackwell_yolos_imgsz()
+            if input_image is None:
+                input_source, input_label = _blackwell_next_yolos_input(imgsz)
+            else:
+                input_source = _blackwell_resolve_path(input_image)
+                input_label = input_source
+            result = runner.infer(input_source)
+
+        inference_ms = result["inference_ms"]
+        detection_count = result["detections"]
+        detection_details = result.get("details", [])
+        speed = result["speed"]
+
+        if hasattr(reactor, "current_packet") and reactor.current_packet is not None:
+            reactor.current_packet["yolos_input"] = input_label
+            reactor.current_packet["yolos_inference_ms"] = inference_ms
+            reactor.current_packet["yolos_speed"] = speed
+            reactor.current_packet["yolos_detection_count"] = detection_count
+            reactor.current_packet["yolos_detections"] = detection_details
+
+        print(
+            f"{reactor.device_name}: YOLOS inference "
+            f"{inference_ms} ms, detections={detection_count}, input={input_label}",
+            flush=True,
+        )
+        print(f"{reactor.device_name}: YOLOS output top detections: {detection_details}", flush=True)
+=}
+
+reactor BlackwellViT(device_index = 2, device_name = "Blackwell", dummy_task = True) {
+    state vit_error
+    state counter = 0
+
+    input trigger
+
+    physical action vit_done
+
+    reaction(trigger) -> vit_done {=
+        input_image = trigger.value
+        elapsed_logical_time = lf.time.logical_elapsed()
+        elapsed_physical_time = lf.time.physical_elapsed()
+        self.current_comp_start_time = lf.time.physical_elapsed() / 1e9
+
+        print(f"{self.device_name}: Tag = ({elapsed_logical_time}, {lf.tag().microstep}) "
+              f"and physical time = {elapsed_physical_time}")
+        # exec_time_ms = task.execution_times[self.device_index]
+
+        def worker():
+            try:
+                _execute_blackwell_yolos_task(self, input_image)
+            except BaseException as exc:
+                self.vit_error = exc
+                print(f"{self.device_name}: ViT task failed: {exc}", flush=True)
+            finally:
+                vit_done.schedule(0)
+
+        self.vit_thread = threading.Thread(target=worker, daemon=True)
+        self.vit_thread.start()
+    =} deadline(10 sec) {=
+        print(f"In {self.device_name}'s deadline handler.")
+        elapsed_logical_time = lf.time.logical_elapsed()
+        elapsed_physical_time = lf.time.physical_elapsed()
+        print(f"Logical time = {elapsed_logical_time} and physical time = {elapsed_physical_time}")
+    =}
+
+    reaction(vit_done) {=
+        print("ViT done")
+        self.counter += 1
+        if self.counter == 2:
+            lf.request_stop()
+    =}
+}

@@ -1,0 +1,25 @@
+target Python {
+    coordination: decentralized
+    // keepalive: true
+}
+
+import BlackwellViT from "../lib/tests/BlackwellViT.lf"
+
+reactor Trigger {
+    logical action a
+    output out
+    reaction(startup, a) -> a, out {=
+        image_path = "dataset128/coco128/images/train2017/000000000025.jpg"
+        a.schedule(SEC(10))
+        out.set(image_path)
+        print(f"Send image: {image_path}")
+    =}
+}
+
+// main reactor{
+federated reactor at localhost {
+    t = new Trigger()
+    b = new BlackwellViT()
+
+    t.out -> b.trigger
+}

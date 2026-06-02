@@ -1,0 +1,23 @@
+target Python {
+    coordination: decentralized
+}
+
+import BlackwellLLM from "../lib/tests/BlackwellLLM.lf"
+
+reactor Trigger {
+    logical action a
+    output out
+    reaction(startup, a) -> a, out {=
+        a.schedule(SEC(10))
+        out.set(True)
+        print("Send output")
+    =}
+}
+
+// main reactor{
+federated reactor at localhost {
+    t = new Trigger()
+    b = new BlackwellLLM()
+
+    t.out -> b.trigger
+}
