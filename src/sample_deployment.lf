@@ -1433,7 +1433,7 @@ federated reactor at 10.218.100.78 {
     d = new TaskDistributor()
     r_1 = new Jetson()
     r_2 = new A6000()
-    r_3 = new Blackwell()
+    r_3 = new Blackwell(dummy_task = False)
 
     e = new EnvironmentUpdateDetector()
     @maxwait(5 sec)
