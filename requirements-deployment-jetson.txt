@@ -1,3 +1,28 @@
-# WiP placeholder for Jetson deployment dependencies.
-# Jetson-specific package and CUDA/TensorRT versions will be added when
-# lib/deployment/Jetson.lf is finalized.
+# Jetson deployment dependencies for YOLOS TensorRT and LLM TensorRT-LLM tasks.
+#
+# Install Jetson/CUDA-specific packages from NVIDIA sources matching your
+# JetPack version before or alongside this file:
+# - torch
+# - torchvision
+# - tensorrt
+# - tensorrt-llm / tensorrt_llm
+#
+# The regular PyPI wheels for those packages may not match Jetson aarch64,
+# CUDA, TensorRT, or JetPack versions.
+
+accelerate
+cuda-python
+numpy
+opencv-python
+pandas
+Pillow
+tokenizers
+transformers
+ultralytics
+
+# Optional for plotting/analysis, not required by the runtime scripts.
+matplotlib
+
+# Optional. Not used by the TensorRT-LLM runner scripts and often problematic
+# on Jetson unless installed from a compatible Jetson build.
+# bitsandbytes>=0.43.0
