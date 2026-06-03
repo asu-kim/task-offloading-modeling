@@ -1,0 +1,499 @@
+import sys
+import random
+import math
+import logging
+from dataclasses import dataclass, field
+from typing import Deque, List, Dict, Tuple, Set
+from collections import deque
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+
+def transfer_time_ms(data_size_mb: float, bandwidth_mb_per_sec: int) -> int:
+    if data_size_mb == 0 or bandwidth_mb_per_sec == 0:
+        return 0
+    return int(math.ceil(float(data_size_mb) / float(bandwidth_mb_per_sec)))
+
+
+def device_name_to_type_index(device_name: str) -> int | None:
+    if device_name.startswith("Jetson"):
+        return 0
+    if device_name.startswith("A6000"):
+        return 1
+    if device_name.startswith("Blackwell"):
+        return 2
+    return None
+
+
+@dataclass
+class Task:
+    name: str = ""
+    index: int = 0
+    deadline: int = -1
+    execution_times: List[int] = field(default_factory=list)
+    child_task_indexes: List[int] = field(default_factory=list, repr=False)
+    parent_task_indexes: List[int] = field(default_factory=list, repr=False)
+    input_size: int = 0
+    output_size: int = 0
+    source_device_index: int = 0
+    priority: float = 0
+    ready_time: int = -1
+    current_device: str = ""
+    communication_start_time: int = 0
+    communication_end_time: int = 0
+    computation_start_time: int = 0
+    computation_end_time: int = 0
+
+
+@dataclass
+class Device:
+    name: str = ""
+    index: int = 0
+    task_queue: Deque[Task] = field(default_factory=deque)
+    comm_channel_available: int = 0
+    comm_queue: list[Tuple[str, int, int]] = field(default_factory=list)
+
+
+@dataclass
+class System:
+    task_csv_path: str
+    dependency_csv_path: str
+    bandwidth_csv_path: str
+    period: int = -1
+    num_devices: int = 3
+    tasks: list[Task] = field(default_factory=list)
+    edges: List[List[int]] = field(init=False)
+    devices: list[Device] = field(init=False)
+    bandwidth: list[list[int]] = field(init=False)
+
+    def __post_init__(self):
+        self.devices = [Device() for _ in range(self.num_devices)]
+        self.bandwidth = [[0] * self.num_devices for _ in range(self.num_devices)]
+
+        comm_df = pd.read_csv(self.bandwidth_csv_path, index_col=0)
+        comm_df.columns = comm_df.columns.str.strip()
+        comm_df.index = comm_df.index.str.strip()
+        csv_device_names = list(comm_df.columns)
+        csv_index_names = list(comm_df.index)
+
+        if len(csv_device_names) != self.num_devices:
+            sys.exit(f"Error: Bandwidth CSV has {len(csv_device_names)} devices, but num_devices={self.num_devices}")
+        if len(csv_index_names) != self.num_devices:
+            sys.exit(f"Error: Bandwidth CSV index has {len(csv_index_names)} devices, but num_devices={self.num_devices}")
+        if csv_device_names != csv_index_names:
+            sys.exit(f"Error: Bandwidth CSV column names and index names do not match. Columns: {csv_device_names}, Index: {csv_index_names}")
+
+        for i, device in enumerate(self.devices):
+            device.name = csv_device_names[i]
+            device.index = i
+
+        comm_values = comm_df.values
+        for i, device in enumerate(self.devices):
+            if comm_df.index[i] != device.name:
+                sys.exit(f"Error: Device name mismatch at index {i}.")
+            for j in range(self.num_devices):
+                value = comm_values[i, j]
+                if pd.isna(value) or (isinstance(value, float) and (value != value)):
+                    sys.exit("Error: No NA is expected.")
+                self.bandwidth[i][j] = int(value)
+
+        df = pd.read_csv(self.task_csv_path)
+        index = 0
+        for _, row in df.iterrows():
+            name = str(row.iloc[0]).strip()
+            if not name or name.lower() == "nan":
+                continue
+            source_device_index = 0
+            if len(row) > 7 and not pd.isna(row.iloc[7]):
+                source_device_index = int(float(row.iloc[7]))
+            task = Task(
+                name=name,
+                index=index,
+                deadline=int(float(row.iloc[1])),
+                execution_times=[
+                    int(float(row.iloc[2])),
+                    int(float(row.iloc[3])),
+                    int(float(row.iloc[4])),
+                ],
+                input_size=int(row.iloc[5]),
+                output_size=int(row.iloc[6]),
+                source_device_index=source_device_index,
+            )
+            self.tasks.append(task)
+            index += 1
+
+        num_tasks = len(self.tasks)
+        self.edges = [[0 for _ in range(num_tasks)] for _ in range(num_tasks)]
+        prob_df = pd.read_csv(self.dependency_csv_path, header=0, index_col=None)
+        for i in range(num_tasks):
+            for j in range(num_tasks):
+                dependency = prob_df.iloc[i, j + 1]
+                if int(dependency) not in (0, 1):
+                    sys.exit("Error: Dependency must be 0 or 1.")
+                self.edges[i][j] = int(dependency)
+
+        for i in range(num_tasks):
+            for j in range(num_tasks):
+                if self.edges[i][j] == 1:
+                    if i not in self.tasks[j].parent_task_indexes:
+                        self.tasks[j].parent_task_indexes.append(i)
+                    if j not in self.tasks[i].child_task_indexes:
+                        self.tasks[i].child_task_indexes.append(j)
+
+        jetson_device_indices = [i for i, device in enumerate(self.devices) if device.name.startswith("Jetson")]
+        if len(jetson_device_indices) == 0:
+            sys.exit("Error: No Jetson device found in system")
+
+        source_tasks = [task for task in self.tasks if len(task.parent_task_indexes) == 0]
+        for task in source_tasks:
+            prefix = task.name.split("_", 1)[0]
+            if prefix.startswith("R") and prefix[1:].isdigit():
+                robot_index = int(prefix[1:]) - 1
+                if robot_index in jetson_device_indices:
+                    task.source_device_index = robot_index
+                    continue
+            if task.source_device_index not in jetson_device_indices:
+                task.source_device_index = random.choice(jetson_device_indices)
+
+        if len(self.tasks) > 0:
+            max_deadline = max((task.deadline for task in self.tasks if task.deadline > 0), default=-1)
+            if max_deadline > 0:
+                self.period = max_deadline
+            elif self.period == -1:
+                sys.exit("No deadline is found")
+
+
+current_time = -1
+global_deadline = -1
+event_q: Deque[Task] = deque()
+job_assignments: List[Dict] = []
+completed_parents: Dict[int, Set[int]] = {}
+
+
+def compute_finish_time(task: Task, device: Device, system: System, current_time: int) -> int:
+    comm_end_time = current_time
+
+    if len(task.parent_task_indexes) > 0:
+        parent_task = system.tasks[task.parent_task_indexes[0]]
+        parent_device = parent_task.current_device
+        if parent_device is None:
+            return sys.maxsize
+        if parent_device == device:
+            comm_end_time = current_time
+        else:
+            source_comm_available = max(parent_device.comm_channel_available, parent_task.computation_end_time)
+            target_comm_available = device.comm_channel_available
+            parent_completion_time = parent_task.computation_end_time
+            transfer_start_time = max(source_comm_available, target_comm_available, parent_completion_time, current_time)
+            bandwidth = system.bandwidth[parent_device.index][device.index]
+            transfer_time = transfer_time_ms(task.input_size, bandwidth) if bandwidth > 0 else 0
+            comm_end_time = transfer_start_time + transfer_time
+    else:
+        source_device = system.devices[task.source_device_index]
+        if source_device == device:
+            comm_end_time = current_time
+        else:
+            source_comm_available = source_device.comm_channel_available
+            target_comm_available = device.comm_channel_available
+            transfer_start_time = max(source_comm_available, target_comm_available, current_time)
+            bandwidth = system.bandwidth[source_device.index][device.index]
+            if task.input_size != 0 and bandwidth == 0:
+                return sys.maxsize
+            transfer_time = transfer_time_ms(task.input_size, bandwidth) if bandwidth > 0 else 0
+            comm_end_time = transfer_start_time + transfer_time
+
+    if len(device.task_queue) > 0:
+        last_task_completion_time = device.task_queue[0].computation_end_time
+    else:
+        last_task_completion_time = current_time
+
+    computation_start_time = max(last_task_completion_time, comm_end_time)
+    device_type_index = device_name_to_type_index(device.name)
+    if device_type_index is None:
+        logger.error(f"Unknown device name: {device.name}")
+        return sys.maxsize
+    return computation_start_time + task.execution_times[device_type_index]
+
+
+def compute_communication_cost(parent_task: Task, child_task: Task, system: System) -> float:
+    data_length = child_task.input_size
+    if data_length == 0:
+        return 0
+    total_cost = 0.0
+    for i in range(system.num_devices):
+        for j in range(system.num_devices):
+            bandwidth = system.bandwidth[i][j]
+            if bandwidth > 0:
+                total_cost += data_length / bandwidth
+    return total_cost / (system.num_devices * system.num_devices)
+
+
+def compute_upward_rank(task: Task, system: System, rank_cache: dict) -> float:
+    if task.index in rank_cache:
+        return rank_cache[task.index]
+    w_i = sum(task.execution_times) / len(task.execution_times) if task.execution_times else 0
+    if len(task.child_task_indexes) == 0:
+        rank_cache[task.index] = w_i
+        return w_i
+    max_child_rank = 0
+    for child_index in task.child_task_indexes:
+        child_task = system.tasks[child_index]
+        child_rank = compute_upward_rank(child_task, system, rank_cache)
+        comm_cost = compute_communication_cost(task, child_task, system)
+        max_child_rank = max(max_child_rank, comm_cost + child_rank)
+    rank_u = w_i + max_child_rank
+    rank_cache[task.index] = rank_u
+    return rank_u
+
+
+def heft_scheduler(system: System, ready_tasks: list[Task], current_time: int = 0):
+    rank_cache = {}
+    for task in ready_tasks:
+        task.priority = compute_upward_rank(task, system, rank_cache)
+
+    mappings = []
+    if len(ready_tasks) == 0:
+        return mappings
+
+    sorted_tasks = sorted(ready_tasks, key=lambda t: (-t.priority, t.deadline if t.deadline else sys.maxsize))
+    assigned_device_indices = set()
+    for task in sorted_tasks:
+        best_device = None
+        best_finish_time = sys.maxsize
+        for device in system.devices:
+            if device.index in assigned_device_indices:
+                continue
+            finish_time = compute_finish_time(task, device, system, current_time)
+            if finish_time < best_finish_time:
+                best_finish_time = finish_time
+                best_device = device
+        if best_device is not None:
+            mappings.append([task, best_device])
+            assigned_device_indices.add(best_device.index)
+            try:
+                event_q.remove(task)
+            except ValueError:
+                pass
+    return mappings
+
+
+def compute_level(task: Task, system: System) -> int:
+    if len(task.child_task_indexes) == 0:
+        return 0
+    max_child_level = 0
+    for child_index in task.child_task_indexes:
+        child_task = system.tasks[child_index]
+        max_child_level = max(max_child_level, compute_level(child_task, system))
+    return 1 + max_child_level
+
+
+def hu_scheduler(system: System, ready_tasks: list[Task], current_time: int = 0):
+    for task in ready_tasks:
+        task.priority = compute_level(task, system)
+
+    mappings = []
+    if len(ready_tasks) == 0:
+        return mappings
+
+    sorted_tasks = sorted(ready_tasks, key=lambda t: (-t.priority, t.deadline if t.deadline else sys.maxsize))
+    assigned_device_indices = set()
+    for task in sorted_tasks:
+        best_device = None
+        best_finish_time = sys.maxsize
+        for device in system.devices:
+            if device.index in assigned_device_indices:
+                continue
+            finish_time = compute_finish_time(task, device, system, current_time)
+            if finish_time < best_finish_time:
+                best_finish_time = finish_time
+                best_device = device
+        if best_device is not None:
+            mappings.append([task, best_device])
+            assigned_device_indices.add(best_device.index)
+            try:
+                event_q.remove(task)
+            except ValueError:
+                pass
+    return mappings
+
+
+def reset_simulation_state(system: System):
+    global current_time, event_q, job_assignments, completed_parents
+    current_time = -1
+    event_q.clear()
+    job_assignments.clear()
+    completed_parents.clear()
+
+    for task in system.tasks:
+        task.ready_time = -1
+        task.current_device = None
+        task.communication_start_time = 0
+        task.communication_end_time = 0
+        task.computation_start_time = 0
+        task.computation_end_time = 0
+        task.priority = 0
+
+    for device in system.devices:
+        device.task_queue.clear()
+        device.comm_channel_available = 0
+        device.comm_queue.clear()
+
+
+def init(system: System):
+    for task in system.tasks:
+        if len(task.parent_task_indexes) == 0:
+            task.ready_time = 0
+        if task.deadline == -1:
+            task.deadline = global_deadline
+        event_q.append(task)
+
+
+def enqueue(system: System, completed_tasks: list[Task]):
+    global completed_parents
+    for task in completed_tasks:
+        if task is None:
+            sys.exit("Error: completed task is None")
+        for child_index in task.child_task_indexes:
+            if child_index not in completed_parents:
+                completed_parents[child_index] = set()
+            completed_parents[child_index].add(task.index)
+            child_task = system.tasks[child_index]
+            if len(completed_parents[child_index]) == len(child_task.parent_task_indexes):
+                max_parent_completion = max(system.tasks[parent_index].computation_end_time for parent_index in child_task.parent_task_indexes)
+                child_task.ready_time = max_parent_completion
+
+
+def dispatch_jobs(system: System, mappings):
+    global job_assignments
+    for task, device in mappings:
+        if len(task.parent_task_indexes) > 0:
+            parent_task = system.tasks[task.parent_task_indexes[0]]
+            if parent_task.current_device == device:
+                task.communication_start_time = current_time
+                task.communication_end_time = current_time
+            else:
+                source_device = parent_task.current_device
+                source_comm_available = max(source_device.comm_channel_available, parent_task.computation_end_time)
+                target_comm_available = device.comm_channel_available
+                task.communication_start_time = max(source_comm_available, target_comm_available, parent_task.computation_end_time, current_time)
+                bandwidth = system.bandwidth[source_device.index][device.index]
+                transfer_time = transfer_time_ms(task.input_size, bandwidth) if bandwidth > 0 else 0
+                task.communication_end_time = task.communication_start_time + transfer_time
+                source_device.comm_channel_available = task.communication_end_time
+                device.comm_channel_available = task.communication_end_time
+                source_device.comm_queue.insert(0, [device.name, task.communication_start_time, task.communication_end_time])
+        else:
+            source_device = system.devices[task.source_device_index]
+            if source_device == device:
+                task.communication_start_time = current_time
+                task.communication_end_time = current_time
+            else:
+                source_comm_available = source_device.comm_channel_available
+                target_comm_available = device.comm_channel_available
+                task.communication_start_time = max(source_comm_available, target_comm_available, current_time)
+                bandwidth = system.bandwidth[source_device.index][device.index]
+                transfer_time = transfer_time_ms(task.input_size, bandwidth) if bandwidth > 0 else 0
+                task.communication_end_time = task.communication_start_time + transfer_time
+                source_device.comm_channel_available = task.communication_end_time
+                device.comm_channel_available = task.communication_end_time
+                source_device.comm_queue.insert(0, [device.name, task.communication_start_time, task.communication_end_time])
+
+        if len(device.task_queue) == 0:
+            task.computation_start_time = max(task.communication_end_time, current_time)
+        else:
+            task.computation_start_time = max(device.task_queue[0].computation_end_time, task.communication_end_time)
+        task.computation_end_time = task.computation_start_time + task.execution_times[device_name_to_type_index(device.name)]
+        task.current_device = device
+        device.task_queue.insert(0, task)
+        job_assignments.append({"job": task, "device": device})
+
+
+def main_loop(system: System, scheduler_name: str, reset_state: bool = True):
+    global current_time
+    if reset_state:
+        reset_simulation_state(system)
+    init(system)
+
+    scheduler_fn = hu_scheduler if scheduler_name == "HU" else heft_scheduler
+
+    while True:
+        if len(event_q) == 0:
+            return job_assignments.copy()
+
+        completion_candidates = [task.computation_end_time for device in system.devices for task in device.task_queue if task.computation_end_time > current_time]
+        next_ready_candidates = [task.ready_time for task in event_q if task.ready_time > current_time]
+        next_times = completion_candidates + next_ready_candidates
+        if current_time == -1:
+            current_time = 0
+        elif len(next_times) == 0:
+            return job_assignments.copy()
+        else:
+            current_time = min(next_times)
+
+        completed_tasks = []
+        for device in system.devices:
+            while len(device.task_queue) > 0 and device.task_queue[-1].computation_end_time == current_time:
+                completed_tasks.append(device.task_queue.pop())
+
+        if len(completed_tasks) > 0:
+            enqueue(system, completed_tasks)
+
+        ready_tasks = [task for task in event_q if task.ready_time != -1 and task.ready_time <= current_time]
+        mappings = scheduler_fn(system=system, ready_tasks=ready_tasks, current_time=current_time)
+        dispatch_jobs(system, mappings=mappings)
+
+
+def build_schedule_outputs(task_csv_path: str, dependency_csv_path: str, bandwidth_csv_path: str, num_devices: int, scheduler_name: str):
+    global global_deadline
+    system = System(
+        task_csv_path=task_csv_path,
+        dependency_csv_path=dependency_csv_path,
+        bandwidth_csv_path=bandwidth_csv_path,
+        num_devices=num_devices,
+    )
+    global_deadline = system.period
+    assignments = main_loop(system, scheduler_name=scheduler_name, reset_state=True)
+
+    device_task = [[] for _ in range(system.num_devices)]
+    task_to_device = {}
+    for assignment in assignments:
+        device_index = assignment["device"].index
+        task_index = assignment["job"].index
+        task = assignment["job"]
+        device_task[device_index].append(task)
+        task_to_device[task_index] = device_index
+
+    device_comm_map = [{} for _ in range(system.num_devices)]
+    for assignment in assignments:
+        task = assignment["job"]
+        task_index = task.index
+        mapped_device_index = task_to_device[task_index]
+
+        if len(task.parent_task_indexes) == 0:
+            source_device_index = task.source_device_index
+            if source_device_index != mapped_device_index:
+                if task_index not in device_comm_map[source_device_index]:
+                    device_comm_map[source_device_index][task_index] = {}
+                device_comm_map[source_device_index][task_index]["source_input"] = {
+                    "destination_device": mapped_device_index,
+                    "child_task": task,
+                    "input_size": task.input_size,
+                    "is_source_input": True,
+                }
+
+        for child_index in task.child_task_indexes:
+            if child_index in task_to_device:
+                destination_device_index = task_to_device[child_index]
+                child_task = system.tasks[child_index]
+                if destination_device_index != mapped_device_index:
+                    if task_index not in device_comm_map[mapped_device_index]:
+                        device_comm_map[mapped_device_index][task_index] = {}
+                    device_comm_map[mapped_device_index][task_index][child_index] = {
+                        "destination_device": destination_device_index,
+                        "child_task": child_task,
+                        "output_size": task.output_size,
+                        "is_source_input": False,
+                    }
+
+    return device_task, device_comm_map

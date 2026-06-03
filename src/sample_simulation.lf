@@ -3,6 +3,7 @@ target Python {
 }
 
 import ComputeDevice from "../lib/simulation/ComputeDevice.lf"
+import HUScheduler from "../lib/simulation/HUScheduler.lf"
 
 preamble {=
     import sys
@@ -1052,110 +1053,6 @@ preamble {=
         return job_assignments.copy()
 =}
 
-reactor Scheduler {
-    preamble {=
-    =}
-
-    input change
-    input tasks
-
-    state dev_mobile = [0, [], [], []]  # Jetson device_index 0
-    state dev_edge = [1, [], [], []]    # A6000 device_index 1
-    state dev_cloud = [2, [], [], []]  # Blackwell device_index 2
-    // state tasks = [[0, 6, [4, 3, 2], 4, 4], [1, 10, [8, 5, 4], 4, 1]] # [index, deadline, [exec_time on Jetson, A6000, Blackwell], input_size, output_size]
-    // state bandwidth = [[0, 2, 5], [2, 0, 3], [5, 3, 0]] # link rates (MB/s) between devices
-    output[3] tasks_to_run
-    output[3] communication_map
-
-    reaction(startup, change, tasks) -> tasks_to_run, communication_map {=
-        task_csv_path = project_path("Tasks.csv")
-        dependency_csv_path = project_path("Dependencies.csv")
-        bandwidth_csv_path = project_path("Bandwidth.csv")
-
-        system = System(task_csv_path=task_csv_path, 
-                    dependency_csv_path=dependency_csv_path, 
-                    bandwidth_csv_path=bandwidth_csv_path, 
-                    num_devices=3)
-
-        global_deadline = system.period
-        job_assignments = main_loop(system, reset_state=True)
-        # print(job_assignments)
-        
-        # Group task indexes by device
-        device_task_indexes = [[] for _ in range(system.num_devices)]
-        device_task = [[] for _ in range(system.num_devices)]
-        # Create a mapping from task index to device index for quick lookup
-        task_to_device = {}
-        for assignment in job_assignments:
-            device_index = assignment["device"].index
-            task_index = assignment["job"].index
-            task = assignment["job"]
-
-            # print(f"task: {task.name}, device: {assignment["device"].index}")
-
-            device_task_indexes[device_index].append(task_index)
-            device_task[device_index].append(task)
-            task_to_device[task_index] = device_index
-        
-        # Build communication map for each device
-        # Format: {task_index: {child_task_index: {destination_device, child_task, output_size}}}
-        # Also includes source tasks: {source_task_index: {"source_input": {destination_device, child_task, input_size}}}
-        device_comm_map = [{} for _ in range(system.num_devices)]
-        
-        for assignment in job_assignments:
-            task = assignment["job"]
-            task_index = task.index
-            mapped_device_index = task_to_device[task_index]
-            
-            # Check if this is a source task mapped to a different device than its source_device_index
-            if len(task.parent_task_indexes) == 0:
-                source_device_index = task.source_device_index
-                if source_device_index != mapped_device_index:
-                    # Source device needs to send initial input data to the mapped device
-                    if task_index not in device_comm_map[source_device_index]:
-                        device_comm_map[source_device_index][task_index] = {}
-                    # Use a special key "source_input" to indicate this is initial input data
-                    device_comm_map[source_device_index][task_index]["source_input"] = {
-                        "destination_device": mapped_device_index,
-                        "child_task": task,
-                        "input_size": task.input_size,
-                        "is_source_input": True
-                    }
-                    logger.debug(f"Source task {task.name} (index {task_index}) has source_device_index={source_device_index} "
-                               f"but is mapped to device {mapped_device_index}. "
-                               f"Device {source_device_index} needs to send initial input data.")
-            
-            # For each child task, find its destination device
-            for child_index in task.child_task_indexes:
-                if child_index in task_to_device:
-                    destination_device_index = task_to_device[child_index]
-                    child_task = system.tasks[child_index]
-                    
-                    # Only add to communication map if child is on a different device
-                    if destination_device_index != mapped_device_index:
-                        if task_index not in device_comm_map[mapped_device_index]:
-                            device_comm_map[mapped_device_index][task_index] = {}
-                        device_comm_map[mapped_device_index][task_index][child_index] = {
-                            "destination_device": destination_device_index,
-                            "child_task": child_task,
-                            "output_size": task.output_size,
-                            "is_source_input": False
-                        }
-                        logger.debug(f"Task {task.name} (index {task_index}) on device {mapped_device_index} "
-                                   f"needs to send output to child {child_task.name} (index {child_index}) "
-                                   f"on device {destination_device_index}")
-        
-        print(device_task_indexes)
-        tasks_to_run[0].set(device_task[0])
-        tasks_to_run[1].set(device_task[1])
-        tasks_to_run[2].set(device_task[2])
-        
-        communication_map[0].set(device_comm_map[0])
-        communication_map[1].set(device_comm_map[1])
-        communication_map[2].set(device_comm_map[2])
-    =}
-}
-
 reactor EnvironmentUpdateDetector {
     // timer t(0, 10 sec)
     output change
@@ -1553,7 +1450,7 @@ reactor NetworkFabric {
 }
 
 main reactor(fast_enable = True) {
-    s = new Scheduler()
+    s = new HUScheduler(num_devices = 3, task_csv_path = "Tasks.csv", dependency_csv_path = "Dependencies.csv", bandwidth_csv_path = "Bandwidth.csv")
     r_1 = new ComputeDevice(device_index = 0, device_type_index = 0, device_name = "Jetson", bandwidth_csv_path = "Bandwidth.csv", fast_enable = fast_enable)
     r_2 = new ComputeDevice(device_index = 1, device_type_index = 1, device_name = "A6000", bandwidth_csv_path = "Bandwidth.csv", fast_enable = fast_enable)
     r_3 = new ComputeDevice(device_index = 2, device_type_index = 2, device_name = "Blackwell", bandwidth_csv_path = "Bandwidth.csv", fast_enable = fast_enable)

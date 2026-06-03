@@ -1,0 +1,392 @@
+target Python {
+    fast: true
+}
+
+import ComputeDevice from "../lib/simulation/ComputeDevice.lf"
+import HUScheduler from "../lib/simulation/HUScheduler.lf"
+
+preamble {=
+    import sys
+    import math
+    import logging
+    from pathlib import Path
+    import pandas as pd
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as mticker
+    from matplotlib.lines import Line2D
+
+    logger = logging.getLogger(__name__)
+
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+    def project_path(*parts):
+        return str(PROJECT_ROOT.joinpath(*parts))
+
+    def scenario_path(filename: str) -> str:
+        return project_path("data", "sample_simulation_1Jetson", filename)
+
+    def transfer_time_ms(data_size_mb: float, bandwidth_mb_per_sec: int) -> int:
+        if data_size_mb == 0 or bandwidth_mb_per_sec == 0:
+            return 0
+        return int(math.ceil(float(data_size_mb) / float(bandwidth_mb_per_sec)))
+=}
+
+reactor EnvironmentUpdateDetector {
+    output change
+    reaction(startup) -> change {=
+    =}
+}
+
+reactor TaskSetSource {
+    output tasks
+    reaction(startup) -> tasks {=
+    =}
+}
+
+reactor OutputVisualizer1Jetson {
+    input d0_output
+    input d1_output
+    input d2_output
+    input d0_trace
+    input d1_trace
+    input d2_trace
+
+    state received_traces = []
+    state plotted = False
+    state bandwidth = []
+
+    reaction(startup) {=
+        self.received_traces = []
+        self.bandwidth = []
+        comm_df = pd.read_csv(scenario_path("Bandwidth.csv"), index_col=0)
+        comm_df.columns = comm_df.columns.str.strip()
+        comm_df.index = comm_df.index.str.strip()
+        n = len(comm_df.columns)
+        self.bandwidth = [[0] * n for _ in range(n)]
+        for i in range(n):
+            for j in range(n):
+                value = comm_df.iloc[i, j]
+                self.bandwidth[i][j] = int(value) if not pd.isna(value) else 0
+    =}
+
+    reaction(d0_trace, d1_trace, d2_trace) {=
+        trace_inputs = [
+            (0, d0_trace),
+            (1, d1_trace),
+            (2, d2_trace),
+        ]
+        for device_index, trace_input in trace_inputs:
+            if trace_input.is_present and not any(t[0] == device_index for t in self.received_traces):
+                self.received_traces.append((device_index, trace_input.value))
+
+        if len(self.received_traces) != 3 or self.plotted:
+            return
+
+        self.plotted = True
+        trace_by_device = {dev_id: trace for dev_id, trace in self.received_traces}
+        all_events = []
+        for device_index in range(3):
+            all_events.extend(trace_by_device.get(device_index, []))
+
+        comp_events = [e for e in all_events if e.get("type") == "comp"]
+        comm_events = [e for e in all_events if e.get("type") == "comm_send"]
+        device_index_to_name = {
+            0: "Jetson_1",
+            1: "A6000",
+            2: "Blackwell",
+        }
+        for event in comp_events:
+            device_index_to_name[event["device_index"]] = event["device_name"]
+
+        desired_top_to_bottom = [0, 1, 2]
+        display_bottom_to_top = list(reversed(desired_top_to_bottom))
+        num_devices = len(display_bottom_to_top)
+        device_index_to_comp_row = {}
+        device_index_to_comm_row = {}
+        row_labels = [""] * (2 * num_devices)
+        for i, dev_idx in enumerate(display_bottom_to_top):
+            comm_row = i * 2
+            comp_row = i * 2 + 1
+            device_index_to_comp_row[dev_idx] = comp_row
+            device_index_to_comm_row[dev_idx] = comm_row
+            name = device_index_to_name[dev_idx]
+            row_labels[comp_row] = f"{name}_comp"
+            row_labels[comm_row] = f"{name}_comm"
+
+        tasks = sorted({e["task_name"] for e in comp_events})
+        if not tasks:
+            return
+        cmap = plt.get_cmap("tab20")
+        task_colors = {task: cmap(i % cmap.N) for i, task in enumerate(tasks)}
+
+        def to_ms(sec):
+            return float(sec) * 1000.0
+
+        sorted_comp_events = sorted(comp_events, key=lambda e: (e["end_time"], e["task_name"]))
+        first_start_ms = min(to_ms(e["start_time"]) for e in sorted_comp_events)
+        last_finish_ms = max(to_ms(e["end_time"]) for e in sorted_comp_events)
+        makespan_ms = last_finish_ms - first_start_ms
+        miss_count = 0
+        tardiness_values_ms = []
+        task_summary_rows = []
+        for event in sorted_comp_events:
+            deadline_ms = event.get("deadline_ms", -1)
+            end_ms = to_ms(event["end_time"])
+            if deadline_ms is None or int(deadline_ms) <= 0:
+                tardiness_ms = 0.0
+                deadline_status = "N/A"
+            else:
+                tardiness_ms = max(0.0, end_ms - float(deadline_ms))
+                deadline_status = "OK" if tardiness_ms == 0.0 else "MISSED"
+                if tardiness_ms > 0.0:
+                    miss_count += 1
+            tardiness_values_ms.append(tardiness_ms)
+            task_summary_rows.append({
+                "task_name": event["task_name"],
+                "device_name": event["device_name"],
+                "start_ms": to_ms(event["start_time"]),
+                "end_ms": end_ms,
+                "deadline_ms": deadline_ms,
+                "deadline_status": deadline_status,
+                "tardiness_ms": tardiness_ms,
+            })
+
+        total_tasks = len(task_summary_rows)
+        miss_rate = (miss_count / total_tasks) if total_tasks > 0 else 0.0
+        max_tardiness_ms = max(tardiness_values_ms) if tardiness_values_ms else 0.0
+        avg_tardiness_ms = (sum(tardiness_values_ms) / total_tasks) if total_tasks > 0 else 0.0
+
+        summary_lines = [
+            "Overall Metrics",
+            f"total_tasks: {total_tasks}",
+            f"first_start_ms: {first_start_ms:.3f}",
+            f"last_finish_ms: {last_finish_ms:.3f}",
+            f"makespan_ms: {makespan_ms:.3f}",
+            f"deadline_miss_count: {miss_count}",
+            f"deadline_miss_rate: {miss_rate:.6f}",
+            f"max_tardiness_ms: {max_tardiness_ms:.3f}",
+            f"average_tardiness_ms: {avg_tardiness_ms:.3f}",
+            "",
+            "Per-Task Results",
+            "task_name,device_name,start_ms,end_ms,deadline_ms,deadline_status,tardiness_ms",
+        ]
+        for row in task_summary_rows:
+            deadline_ms = row["deadline_ms"]
+            deadline_str = "N/A" if deadline_ms is None or int(deadline_ms) <= 0 else f"{float(deadline_ms):.3f}"
+            summary_lines.append(
+                "{},{},{:.3f},{:.3f},{},{},{:.3f}".format(
+                    row["task_name"],
+                    row["device_name"],
+                    row["start_ms"],
+                    row["end_ms"],
+                    deadline_str,
+                    row["deadline_status"],
+                    row["tardiness_ms"],
+                )
+            )
+
+        fig, ax = plt.subplots(figsize=(14, max(6, num_devices * 1.5)))
+        bar_height = 0.6
+        xmax_ms = 100.0
+
+        for event in comp_events:
+            row = device_index_to_comp_row[event["device_index"]]
+            start_ms = to_ms(event["start_time"])
+            dur_ms = to_ms(event["end_time"] - event["start_time"])
+            end_ms = to_ms(event["end_time"])
+            task = event["task_name"]
+            color = task_colors.get(task, "gray")
+            deadline_ms = event.get("deadline_ms", -1)
+            xmax_ms = max(xmax_ms, end_ms + 50.0, float(deadline_ms) + 50.0 if deadline_ms and deadline_ms > 0 else end_ms + 50.0)
+            status = "OK" if deadline_ms <= 0 or end_ms <= float(deadline_ms) else "MISSED"
+            ax.broken_barh([(start_ms, dur_ms)], (row - bar_height / 2, bar_height), facecolors=color)
+            ax.text(start_ms + dur_ms / 2, row, f"{task} ({status})", ha="center", va="center", fontsize=7, color="white", clip_on=True)
+
+        for event in comm_events:
+            from_dev = event["from_device"]
+            to_dev = event["to_device"]
+            start_ms = to_ms(event["start_time"])
+            output_size = event.get("output_size", 0)
+            bw = self.bandwidth[from_dev][to_dev] if self.bandwidth else 0
+            dur_ms = float(transfer_time_ms(output_size, bw)) if bw > 0 else 0.0
+            task = event["task_name"]
+            color = task_colors.get(task, "gray")
+            xmax_ms = max(xmax_ms, start_ms + dur_ms + 50.0)
+            for row in [device_index_to_comm_row[from_dev], device_index_to_comm_row[to_dev]]:
+                ax.broken_barh([(start_ms, dur_ms)], (row - bar_height / 2, bar_height), facecolors=color, alpha=0.7)
+                ax.text(start_ms + dur_ms / 2, row, f"{task} (comm)", ha="center", va="center", fontsize=7, color="white", clip_on=True)
+
+        drawn_deadlines = set()
+        for event in comp_events:
+            deadline_ms = event.get("deadline_ms", -1)
+            if deadline_ms is None or int(deadline_ms) <= 0 or float(deadline_ms) in drawn_deadlines:
+                continue
+            drawn_deadlines.add(float(deadline_ms))
+            ax.axvline(float(deadline_ms), color="0.35", linestyle="--", linewidth=1.2, alpha=0.85, zorder=0)
+
+        xmax_ms = float(int(math.ceil(max(xmax_ms, 100.0) / 100.0)) * 100)
+        ax.set_xlim(0.0, xmax_ms)
+        x_ticks = [float(v) for v in range(0, int(xmax_ms) + 1, 100)]
+        ax.set_xticks(x_ticks)
+        ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda value, _: f"{int(value)}"))
+        ax.set_yticks(range(len(row_labels)))
+        ax.set_yticklabels(row_labels)
+        ax.set_xlabel("Time (ms)")
+        ax.set_title("1-Jetson Device Scheduling (from runtime trace)")
+        ax.grid(axis="x", linestyle="--", alpha=0.4)
+        handles = [Line2D([0], [0], color=task_colors[t], lw=8, label=t) for t in tasks]
+        handles.append(Line2D([0], [0], color="0.35", linestyle="--", lw=1.5, label="Deadline"))
+        ax.legend(handles=handles, title="Task types", ncol=2)
+        plt.tight_layout()
+        plt.savefig(project_path("schedule_trace_1Jetson.png"), dpi=150)
+        plt.close(fig)
+
+        with open(project_path("schedule_trace_1Jetson.txt"), "w", encoding="utf-8") as summary_file:
+            summary_file.write("\n".join(summary_lines) + "\n")
+    =}
+}
+
+reactor NetworkFabric1Jetson {
+    input change
+    input in_port0
+    input in_port1
+    input in_port2
+    logical action out_port0_trigger
+    logical action out_port1_trigger
+    logical action out_port2_trigger
+    output out_port0
+    output out_port1
+    output out_port2
+
+    state num_devices = 3
+    state bandwidth
+    state pending_packets
+    state sender_available_ns
+
+    reaction(startup) {=
+        self.bandwidth = [[0] * self.num_devices for _ in range(self.num_devices)]
+        self.pending_packets = [[] for _ in range(self.num_devices)]
+        self.sender_available_ns = [0 for _ in range(self.num_devices)]
+        comm_df = pd.read_csv(scenario_path("Bandwidth.csv"), index_col=0)
+        comm_df.columns = comm_df.columns.str.strip()
+        comm_df.index = comm_df.index.str.strip()
+        comm_values = comm_df.values
+        for i in range(self.num_devices):
+            for j in range(self.num_devices):
+                value = comm_values[i, j]
+                if pd.isna(value) or (isinstance(value, float) and (value != value)):
+                    sys.exit("Error: No NA is expected.")
+                self.bandwidth[i][j] = int(value)
+    =}
+
+    reaction(in_port0, in_port1, in_port2) -> out_port0_trigger, out_port1_trigger, out_port2_trigger {=
+        incoming_packets = []
+        if in_port0.is_present:
+            incoming_packets.append((0, in_port0.value))
+        if in_port1.is_present:
+            incoming_packets.append((1, in_port1.value))
+        if in_port2.is_present:
+            incoming_packets.append((2, in_port2.value))
+        if len(incoming_packets) == 0:
+            return
+
+        for source_port, packet in incoming_packets:
+            if not (isinstance(packet, dict) and "destination_device" in packet):
+                continue
+            destination_device = packet["destination_device"]
+            payload_size = packet.get("input_size", packet.get("output_size", 0))
+            bw = self.bandwidth[source_port][destination_device]
+            transfer_delay_ms = transfer_time_ms(payload_size, bw) if bw > 0 else 0
+            now_ns = int(lf.time.logical_elapsed())
+            transfer_start_ns = max(now_ns, int(self.sender_available_ns[source_port]))
+            ready_time_ns = transfer_start_ns + int(transfer_delay_ms) * 1000000
+            self.sender_available_ns[source_port] = ready_time_ns
+            self.pending_packets[destination_device].append((ready_time_ns, packet))
+            self.pending_packets[destination_device].sort(key=lambda x: x[0])
+            schedule_wait_ms = int(math.ceil((ready_time_ns - now_ns) / 1000000.0))
+
+            if destination_device == 0:
+                out_port0_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+            elif destination_device == 1:
+                out_port1_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+            elif destination_device == 2:
+                out_port2_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+    =}
+
+    reaction(out_port0_trigger) -> out_port0, out_port0_trigger {=
+        if len(self.pending_packets[0]) == 0:
+            return
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[0].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[0][0]
+        if next_ready_ns > current_ns:
+            out_port0_trigger.schedule(MSEC(max(int(math.ceil((next_ready_ns - current_ns) / 1000000.0)), 1)))
+            return
+        _, packet = self.pending_packets[0].pop(0)
+        out_port0.set(packet)
+        if len(self.pending_packets[0]) > 0:
+            out_port0_trigger.schedule(MSEC(max(int(math.ceil((self.pending_packets[0][0][0] - current_ns) / 1000000.0)), 0)))
+    =}
+
+    reaction(out_port1_trigger) -> out_port1, out_port1_trigger {=
+        if len(self.pending_packets[1]) == 0:
+            return
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[1].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[1][0]
+        if next_ready_ns > current_ns:
+            out_port1_trigger.schedule(MSEC(max(int(math.ceil((next_ready_ns - current_ns) / 1000000.0)), 1)))
+            return
+        _, packet = self.pending_packets[1].pop(0)
+        out_port1.set(packet)
+        if len(self.pending_packets[1]) > 0:
+            out_port1_trigger.schedule(MSEC(max(int(math.ceil((self.pending_packets[1][0][0] - current_ns) / 1000000.0)), 0)))
+    =}
+
+    reaction(out_port2_trigger) -> out_port2, out_port2_trigger {=
+        if len(self.pending_packets[2]) == 0:
+            return
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[2].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[2][0]
+        if next_ready_ns > current_ns:
+            out_port2_trigger.schedule(MSEC(max(int(math.ceil((next_ready_ns - current_ns) / 1000000.0)), 1)))
+            return
+        _, packet = self.pending_packets[2].pop(0)
+        out_port2.set(packet)
+        if len(self.pending_packets[2]) > 0:
+            out_port2_trigger.schedule(MSEC(max(int(math.ceil((self.pending_packets[2][0][0] - current_ns) / 1000000.0)), 0)))
+    =}
+}
+
+main reactor(fast_enable = True) {
+    s = new HUScheduler(num_devices = 3, task_csv_path = "data/sample_simulation_1Jetson/Tasks.csv", dependency_csv_path = "data/sample_simulation_1Jetson/Dependencies.csv", bandwidth_csv_path = "data/sample_simulation_1Jetson/Bandwidth.csv")
+    r_1 = new ComputeDevice(device_index = 0, device_type_index = 0, device_name = "Jetson_1", bandwidth_csv_path = "data/sample_simulation_1Jetson/Bandwidth.csv", fast_enable = fast_enable)
+    r_2 = new ComputeDevice(device_index = 1, device_type_index = 1, device_name = "A6000", bandwidth_csv_path = "data/sample_simulation_1Jetson/Bandwidth.csv", fast_enable = fast_enable)
+    r_3 = new ComputeDevice(device_index = 2, device_type_index = 2, device_name = "Blackwell", bandwidth_csv_path = "data/sample_simulation_1Jetson/Bandwidth.csv", fast_enable = fast_enable)
+    n = new NetworkFabric1Jetson()
+    t = new TaskSetSource()
+    e = new EnvironmentUpdateDetector()
+    o = new OutputVisualizer1Jetson()
+
+    t.tasks, e.change -> s.tasks, s.change
+    e.change -> n.change
+
+    s.tasks_to_run -> r_1.tasks_to_run, r_2.tasks_to_run, r_3.tasks_to_run
+    s.communication_map -> r_1.communication_map, r_2.communication_map, r_3.communication_map
+
+    r_1.out_port -> n.in_port0 after 1 ms
+    r_2.out_port -> n.in_port1 after 1 ms
+    r_3.out_port -> n.in_port2 after 1 ms
+
+    n.out_port0 -> r_1.in_port after 1 ms
+    n.out_port1 -> r_2.in_port after 1 ms
+    n.out_port2 -> r_3.in_port after 1 ms
+
+    r_1.final_output, r_2.final_output, r_3.final_output -> o.d0_output, o.d1_output, o.d2_output
+    r_1.trace_output -> o.d0_trace
+    r_2.trace_output -> o.d1_trace
+    r_3.trace_output -> o.d2_trace
+}

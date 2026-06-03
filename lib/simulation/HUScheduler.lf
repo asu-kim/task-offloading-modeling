@@ -1,0 +1,42 @@
+target Python
+preamble {=
+    import sys
+    from pathlib import Path
+
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+    def project_path(*parts):
+        return str(PROJECT_ROOT.joinpath(*parts))
+
+    runtime_dir = PROJECT_ROOT / "lib" / "simulation"
+    if str(runtime_dir) not in sys.path:
+        sys.path.insert(0, str(runtime_dir))
+
+    from scheduler_runtime import build_schedule_outputs
+=}
+
+reactor HUScheduler(
+    num_devices = 3,
+    task_csv_path = "Tasks.csv",
+    dependency_csv_path = "Dependencies.csv",
+    bandwidth_csv_path = "Bandwidth.csv"
+) {
+    input change
+    input tasks
+    output[num_devices] tasks_to_run
+    output[num_devices] communication_map
+
+    reaction(startup, change, tasks) -> tasks_to_run, communication_map {=
+        device_task, device_comm_map = build_schedule_outputs(
+            task_csv_path=project_path(self.task_csv_path),
+            dependency_csv_path=project_path(self.dependency_csv_path),
+            bandwidth_csv_path=project_path(self.bandwidth_csv_path),
+            num_devices=int(self.num_devices),
+            scheduler_name="HU"
+        )
+
+        for i in range(int(self.num_devices)):
+            tasks_to_run[i].set(device_task[i])
+            communication_map[i].set(device_comm_map[i])
+    =}
+}

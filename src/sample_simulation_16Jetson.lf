@@ -1,0 +1,842 @@
+target Python {
+    fast: true
+}
+
+import ComputeDevice from "../lib/simulation/ComputeDevice.lf"
+import HUScheduler from "../lib/simulation/HUScheduler.lf"
+
+preamble {=
+    import sys
+    import math
+    import logging
+    from pathlib import Path
+    import pandas as pd
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as mticker
+    from matplotlib.lines import Line2D
+
+    logger = logging.getLogger(__name__)
+
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+    def project_path(*parts):
+        return str(PROJECT_ROOT.joinpath(*parts))
+
+    def scenario_path(filename: str) -> str:
+        return project_path("data", "sample_simulation_16Jetson", filename)
+
+    def transfer_time_ms(data_size_mb: float, bandwidth_mb_per_sec: int) -> int:
+        if data_size_mb == 0 or bandwidth_mb_per_sec == 0:
+            return 0
+        return int(math.ceil(float(data_size_mb) / float(bandwidth_mb_per_sec)))
+=}
+
+reactor EnvironmentUpdateDetector {
+    output change
+    reaction(startup) -> change {=
+    =}
+}
+
+reactor TaskSetSource {
+    output tasks
+    reaction(startup) -> tasks {=
+    =}
+}
+
+reactor OutputVisualizer16Jetson {
+    input d0_output
+    input d1_output
+    input d2_output
+    input d3_output
+    input d4_output
+    input d5_output
+    input d6_output
+    input d7_output
+    input d8_output
+    input d9_output
+    input d10_output
+    input d11_output
+    input d12_output
+    input d13_output
+    input d14_output
+    input d15_output
+    input d16_output
+    input d17_output
+    input d0_trace
+    input d1_trace
+    input d2_trace
+    input d3_trace
+    input d4_trace
+    input d5_trace
+    input d6_trace
+    input d7_trace
+    input d8_trace
+    input d9_trace
+    input d10_trace
+    input d11_trace
+    input d12_trace
+    input d13_trace
+    input d14_trace
+    input d15_trace
+    input d16_trace
+    input d17_trace
+
+    state received_traces = []
+    state plotted = False
+    state bandwidth = []
+
+    reaction(startup) {=
+        self.received_traces = []
+        self.bandwidth = []
+        comm_df = pd.read_csv(scenario_path("Bandwidth.csv"), index_col=0)
+        comm_df.columns = comm_df.columns.str.strip()
+        comm_df.index = comm_df.index.str.strip()
+        n = len(comm_df.columns)
+        self.bandwidth = [[0] * n for _ in range(n)]
+        for i in range(n):
+            for j in range(n):
+                value = comm_df.iloc[i, j]
+                self.bandwidth[i][j] = int(value) if not pd.isna(value) else 0
+    =}
+
+    reaction(d0_trace, d1_trace, d2_trace, d3_trace, d4_trace, d5_trace, d6_trace, d7_trace, d8_trace, d9_trace, d10_trace, d11_trace, d12_trace, d13_trace, d14_trace, d15_trace, d16_trace, d17_trace) {=
+        trace_inputs = [
+            (0, d0_trace),
+            (1, d1_trace),
+            (2, d2_trace),
+            (3, d3_trace),
+            (4, d4_trace),
+            (5, d5_trace),
+            (6, d6_trace),
+            (7, d7_trace),
+            (8, d8_trace),
+            (9, d9_trace),
+            (10, d10_trace),
+            (11, d11_trace),
+            (12, d12_trace),
+            (13, d13_trace),
+            (14, d14_trace),
+            (15, d15_trace),
+            (16, d16_trace),
+            (17, d17_trace),
+        ]
+        for device_index, trace_input in trace_inputs:
+            if trace_input.is_present and not any(t[0] == device_index for t in self.received_traces):
+                self.received_traces.append((device_index, trace_input.value))
+
+        if len(self.received_traces) != 18 or self.plotted:
+            return
+
+        self.plotted = True
+        trace_by_device = {dev_id: trace for dev_id, trace in self.received_traces}
+        all_events = []
+        for device_index in range(18):
+            all_events.extend(trace_by_device.get(device_index, []))
+
+        comp_events = [e for e in all_events if e.get("type") == "comp"]
+        comm_events = [e for e in all_events if e.get("type") == "comm_send"]
+        device_index_to_name = {
+            0: "Jetson_1",
+            1: "Jetson_2",
+            2: "Jetson_3",
+            3: "Jetson_4",
+            4: "Jetson_5",
+            5: "Jetson_6",
+            6: "Jetson_7",
+            7: "Jetson_8",
+            8: "Jetson_9",
+            9: "Jetson_10",
+            10: "Jetson_11",
+            11: "Jetson_12",
+            12: "Jetson_13",
+            13: "Jetson_14",
+            14: "Jetson_15",
+            15: "Jetson_16",
+            16: "A6000",
+            17: "Blackwell",
+        }
+        for event in comp_events:
+            device_index_to_name[event["device_index"]] = event["device_name"]
+
+        desired_top_to_bottom = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+        display_bottom_to_top = list(reversed(desired_top_to_bottom))
+        num_devices = len(display_bottom_to_top)
+        device_index_to_comp_row = {}
+        device_index_to_comm_row = {}
+        row_labels = [""] * (2 * num_devices)
+        for i, dev_idx in enumerate(display_bottom_to_top):
+            comm_row = i * 2
+            comp_row = i * 2 + 1
+            device_index_to_comp_row[dev_idx] = comp_row
+            device_index_to_comm_row[dev_idx] = comm_row
+            name = device_index_to_name[dev_idx]
+            row_labels[comp_row] = f"{name}_comp"
+            row_labels[comm_row] = f"{name}_comm"
+
+        tasks = sorted({e["task_name"] for e in comp_events})
+        if not tasks:
+            return
+        cmap = plt.get_cmap("tab20")
+        task_colors = {task: cmap(i % cmap.N) for i, task in enumerate(tasks)}
+
+        def to_ms(sec):
+            return float(sec) * 1000.0
+
+        sorted_comp_events = sorted(comp_events, key=lambda e: (e["end_time"], e["task_name"]))
+        first_start_ms = min(to_ms(e["start_time"]) for e in sorted_comp_events)
+        last_finish_ms = max(to_ms(e["end_time"]) for e in sorted_comp_events)
+        makespan_ms = last_finish_ms - first_start_ms
+        miss_count = 0
+        tardiness_values_ms = []
+        task_summary_rows = []
+        for event in sorted_comp_events:
+            deadline_ms = event.get("deadline_ms", -1)
+            end_ms = to_ms(event["end_time"])
+            if deadline_ms is None or int(deadline_ms) <= 0:
+                tardiness_ms = 0.0
+                deadline_status = "N/A"
+            else:
+                tardiness_ms = max(0.0, end_ms - float(deadline_ms))
+                deadline_status = "OK" if tardiness_ms == 0.0 else "MISSED"
+                if tardiness_ms > 0.0:
+                    miss_count += 1
+            tardiness_values_ms.append(tardiness_ms)
+            task_summary_rows.append({
+                "task_name": event["task_name"],
+                "device_name": event["device_name"],
+                "start_ms": to_ms(event["start_time"]),
+                "end_ms": end_ms,
+                "deadline_ms": deadline_ms,
+                "deadline_status": deadline_status,
+                "tardiness_ms": tardiness_ms,
+            })
+
+        total_tasks = len(task_summary_rows)
+        miss_rate = (miss_count / total_tasks) if total_tasks > 0 else 0.0
+        max_tardiness_ms = max(tardiness_values_ms) if tardiness_values_ms else 0.0
+        avg_tardiness_ms = (sum(tardiness_values_ms) / total_tasks) if total_tasks > 0 else 0.0
+
+        summary_lines = [
+            "Overall Metrics",
+            f"total_tasks: {total_tasks}",
+            f"first_start_ms: {first_start_ms:.3f}",
+            f"last_finish_ms: {last_finish_ms:.3f}",
+            f"makespan_ms: {makespan_ms:.3f}",
+            f"deadline_miss_count: {miss_count}",
+            f"deadline_miss_rate: {miss_rate:.6f}",
+            f"max_tardiness_ms: {max_tardiness_ms:.3f}",
+            f"average_tardiness_ms: {avg_tardiness_ms:.3f}",
+            "",
+            "Per-Task Results",
+            "task_name,device_name,start_ms,end_ms,deadline_ms,deadline_status,tardiness_ms",
+        ]
+        for row in task_summary_rows:
+            deadline_ms = row["deadline_ms"]
+            deadline_str = "N/A" if deadline_ms is None or int(deadline_ms) <= 0 else f"{float(deadline_ms):.3f}"
+            summary_lines.append(
+                "{},{},{:.3f},{:.3f},{},{},{:.3f}".format(
+                    row["task_name"],
+                    row["device_name"],
+                    row["start_ms"],
+                    row["end_ms"],
+                    deadline_str,
+                    row["deadline_status"],
+                    row["tardiness_ms"],
+                )
+            )
+
+        fig, ax = plt.subplots(figsize=(14, max(6, num_devices * 1.5)))
+        bar_height = 0.6
+        xmax_ms = 100.0
+
+        for event in comp_events:
+            row = device_index_to_comp_row[event["device_index"]]
+            start_ms = to_ms(event["start_time"])
+            dur_ms = to_ms(event["end_time"] - event["start_time"])
+            end_ms = to_ms(event["end_time"])
+            task = event["task_name"]
+            color = task_colors.get(task, "gray")
+            deadline_ms = event.get("deadline_ms", -1)
+            xmax_ms = max(xmax_ms, end_ms + 50.0, float(deadline_ms) + 50.0 if deadline_ms and deadline_ms > 0 else end_ms + 50.0)
+            status = "OK" if deadline_ms <= 0 or end_ms <= float(deadline_ms) else "MISSED"
+            ax.broken_barh([(start_ms, dur_ms)], (row - bar_height / 2, bar_height), facecolors=color)
+            ax.text(start_ms + dur_ms / 2, row, f"{task} ({status})", ha="center", va="center", fontsize=7, color="white", clip_on=True)
+
+        for event in comm_events:
+            from_dev = event["from_device"]
+            to_dev = event["to_device"]
+            start_ms = to_ms(event["start_time"])
+            output_size = event.get("output_size", 0)
+            bw = self.bandwidth[from_dev][to_dev] if self.bandwidth else 0
+            dur_ms = float(transfer_time_ms(output_size, bw)) if bw > 0 else 0.0
+            task = event["task_name"]
+            color = task_colors.get(task, "gray")
+            xmax_ms = max(xmax_ms, start_ms + dur_ms + 50.0)
+            for row in [device_index_to_comm_row[from_dev], device_index_to_comm_row[to_dev]]:
+                ax.broken_barh([(start_ms, dur_ms)], (row - bar_height / 2, bar_height), facecolors=color, alpha=0.7)
+                ax.text(start_ms + dur_ms / 2, row, f"{task} (comm)", ha="center", va="center", fontsize=7, color="white", clip_on=True)
+
+        drawn_deadlines = set()
+        for event in comp_events:
+            deadline_ms = event.get("deadline_ms", -1)
+            if deadline_ms is None or int(deadline_ms) <= 0 or float(deadline_ms) in drawn_deadlines:
+                continue
+            drawn_deadlines.add(float(deadline_ms))
+            ax.axvline(float(deadline_ms), color="0.35", linestyle="--", linewidth=1.2, alpha=0.85, zorder=0)
+
+        xmax_ms = float(int(math.ceil(max(xmax_ms, 100.0) / 100.0)) * 100)
+        ax.set_xlim(0.0, xmax_ms)
+        x_ticks = [float(v) for v in range(0, int(xmax_ms) + 1, 100)]
+        ax.set_xticks(x_ticks)
+        ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda value, _: f"{int(value)}"))
+        ax.set_yticks(range(len(row_labels)))
+        ax.set_yticklabels(row_labels)
+        ax.set_xlabel("Time (ms)")
+        ax.set_title("16-Jetson Device Scheduling (from runtime trace)")
+        ax.grid(axis="x", linestyle="--", alpha=0.4)
+        handles = [Line2D([0], [0], color=task_colors[t], lw=8, label=t) for t in tasks]
+        handles.append(Line2D([0], [0], color="0.35", linestyle="--", lw=1.5, label="Deadline"))
+        ax.legend(handles=handles, title="Task types", ncol=2)
+        plt.tight_layout()
+        plt.savefig(project_path("schedule_trace_16Jetson.png"), dpi=150)
+        plt.close(fig)
+
+        with open(project_path("schedule_trace_16Jetson.txt"), "w", encoding="utf-8") as summary_file:
+            summary_file.write("\n".join(summary_lines) + "\n")
+    =}
+}
+
+reactor NetworkFabric16Jetson {
+    input change
+    input in_port0
+    input in_port1
+    input in_port2
+    input in_port3
+    input in_port4
+    input in_port5
+    input in_port6
+    input in_port7
+    input in_port8
+    input in_port9
+    input in_port10
+    input in_port11
+    input in_port12
+    input in_port13
+    input in_port14
+    input in_port15
+    input in_port16
+    input in_port17
+    logical action out_port0_trigger
+    logical action out_port1_trigger
+    logical action out_port2_trigger
+    logical action out_port3_trigger
+    logical action out_port4_trigger
+    logical action out_port5_trigger
+    logical action out_port6_trigger
+    logical action out_port7_trigger
+    logical action out_port8_trigger
+    logical action out_port9_trigger
+    logical action out_port10_trigger
+    logical action out_port11_trigger
+    logical action out_port12_trigger
+    logical action out_port13_trigger
+    logical action out_port14_trigger
+    logical action out_port15_trigger
+    logical action out_port16_trigger
+    logical action out_port17_trigger
+    output out_port0
+    output out_port1
+    output out_port2
+    output out_port3
+    output out_port4
+    output out_port5
+    output out_port6
+    output out_port7
+    output out_port8
+    output out_port9
+    output out_port10
+    output out_port11
+    output out_port12
+    output out_port13
+    output out_port14
+    output out_port15
+    output out_port16
+    output out_port17
+
+    state num_devices = 18
+    state bandwidth
+    state pending_packets
+    state sender_available_ns
+
+    reaction(startup) {=
+        self.bandwidth = [[0] * self.num_devices for _ in range(self.num_devices)]
+        self.pending_packets = [[] for _ in range(self.num_devices)]
+        self.sender_available_ns = [0 for _ in range(self.num_devices)]
+        comm_df = pd.read_csv(scenario_path("Bandwidth.csv"), index_col=0)
+        comm_df.columns = comm_df.columns.str.strip()
+        comm_df.index = comm_df.index.str.strip()
+        comm_values = comm_df.values
+        for i in range(self.num_devices):
+            for j in range(self.num_devices):
+                value = comm_values[i, j]
+                if pd.isna(value) or (isinstance(value, float) and (value != value)):
+                    sys.exit("Error: No NA is expected.")
+                self.bandwidth[i][j] = int(value)
+    =}
+
+    reaction(in_port0, in_port1, in_port2, in_port3, in_port4, in_port5, in_port6, in_port7, in_port8, in_port9, in_port10, in_port11, in_port12, in_port13, in_port14, in_port15, in_port16, in_port17) -> out_port0_trigger, out_port1_trigger, out_port2_trigger, out_port3_trigger, out_port4_trigger, out_port5_trigger, out_port6_trigger, out_port7_trigger, out_port8_trigger, out_port9_trigger, out_port10_trigger, out_port11_trigger, out_port12_trigger, out_port13_trigger, out_port14_trigger, out_port15_trigger, out_port16_trigger, out_port17_trigger {=
+        incoming_packets = []
+        if in_port0.is_present:
+            incoming_packets.append((0, in_port0.value))
+        if in_port1.is_present:
+            incoming_packets.append((1, in_port1.value))
+        if in_port2.is_present:
+            incoming_packets.append((2, in_port2.value))
+        if in_port3.is_present:
+            incoming_packets.append((3, in_port3.value))
+        if in_port4.is_present:
+            incoming_packets.append((4, in_port4.value))
+        if in_port5.is_present:
+            incoming_packets.append((5, in_port5.value))
+        if in_port6.is_present:
+            incoming_packets.append((6, in_port6.value))
+        if in_port7.is_present:
+            incoming_packets.append((7, in_port7.value))
+        if in_port8.is_present:
+            incoming_packets.append((8, in_port8.value))
+        if in_port9.is_present:
+            incoming_packets.append((9, in_port9.value))
+        if in_port10.is_present:
+            incoming_packets.append((10, in_port10.value))
+        if in_port11.is_present:
+            incoming_packets.append((11, in_port11.value))
+        if in_port12.is_present:
+            incoming_packets.append((12, in_port12.value))
+        if in_port13.is_present:
+            incoming_packets.append((13, in_port13.value))
+        if in_port14.is_present:
+            incoming_packets.append((14, in_port14.value))
+        if in_port15.is_present:
+            incoming_packets.append((15, in_port15.value))
+        if in_port16.is_present:
+            incoming_packets.append((16, in_port16.value))
+        if in_port17.is_present:
+            incoming_packets.append((17, in_port17.value))
+        if len(incoming_packets) == 0:
+            return
+
+        for source_port, packet in incoming_packets:
+            if not (isinstance(packet, dict) and "destination_device" in packet):
+                continue
+            destination_device = packet["destination_device"]
+            payload_size = packet.get("input_size", packet.get("output_size", 0))
+            bw = self.bandwidth[source_port][destination_device]
+            transfer_delay_ms = transfer_time_ms(payload_size, bw) if bw > 0 else 0
+            now_ns = int(lf.time.logical_elapsed())
+            transfer_start_ns = max(now_ns, int(self.sender_available_ns[source_port]))
+            ready_time_ns = transfer_start_ns + int(transfer_delay_ms) * 1000000
+            self.sender_available_ns[source_port] = ready_time_ns
+            self.pending_packets[destination_device].append((ready_time_ns, packet))
+            self.pending_packets[destination_device].sort(key=lambda x: x[0])
+            schedule_wait_ms = int(math.ceil((ready_time_ns - now_ns) / 1000000.0))
+
+            if destination_device == 0:
+                out_port0_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+            elif destination_device == 1:
+                out_port1_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+            elif destination_device == 2:
+                out_port2_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+            elif destination_device == 3:
+                out_port3_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+            elif destination_device == 4:
+                out_port4_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+            elif destination_device == 5:
+                out_port5_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+            elif destination_device == 6:
+                out_port6_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+            elif destination_device == 7:
+                out_port7_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+            elif destination_device == 8:
+                out_port8_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+            elif destination_device == 9:
+                out_port9_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+            elif destination_device == 10:
+                out_port10_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+            elif destination_device == 11:
+                out_port11_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+            elif destination_device == 12:
+                out_port12_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+            elif destination_device == 13:
+                out_port13_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+            elif destination_device == 14:
+                out_port14_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+            elif destination_device == 15:
+                out_port15_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+            elif destination_device == 16:
+                out_port16_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+            elif destination_device == 17:
+                out_port17_trigger.schedule(MSEC(max(schedule_wait_ms, 0)))
+    =}
+
+    reaction(out_port0_trigger) -> out_port0, out_port0_trigger {=
+        if len(self.pending_packets[0]) == 0:
+            return
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[0].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[0][0]
+        if next_ready_ns > current_ns:
+            out_port0_trigger.schedule(MSEC(max(int(math.ceil((next_ready_ns - current_ns) / 1000000.0)), 1)))
+            return
+        _, packet = self.pending_packets[0].pop(0)
+        out_port0.set(packet)
+        if len(self.pending_packets[0]) > 0:
+            out_port0_trigger.schedule(MSEC(max(int(math.ceil((self.pending_packets[0][0][0] - current_ns) / 1000000.0)), 0)))
+    =}
+
+    reaction(out_port1_trigger) -> out_port1, out_port1_trigger {=
+        if len(self.pending_packets[1]) == 0:
+            return
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[1].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[1][0]
+        if next_ready_ns > current_ns:
+            out_port1_trigger.schedule(MSEC(max(int(math.ceil((next_ready_ns - current_ns) / 1000000.0)), 1)))
+            return
+        _, packet = self.pending_packets[1].pop(0)
+        out_port1.set(packet)
+        if len(self.pending_packets[1]) > 0:
+            out_port1_trigger.schedule(MSEC(max(int(math.ceil((self.pending_packets[1][0][0] - current_ns) / 1000000.0)), 0)))
+    =}
+
+    reaction(out_port2_trigger) -> out_port2, out_port2_trigger {=
+        if len(self.pending_packets[2]) == 0:
+            return
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[2].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[2][0]
+        if next_ready_ns > current_ns:
+            out_port2_trigger.schedule(MSEC(max(int(math.ceil((next_ready_ns - current_ns) / 1000000.0)), 1)))
+            return
+        _, packet = self.pending_packets[2].pop(0)
+        out_port2.set(packet)
+        if len(self.pending_packets[2]) > 0:
+            out_port2_trigger.schedule(MSEC(max(int(math.ceil((self.pending_packets[2][0][0] - current_ns) / 1000000.0)), 0)))
+    =}
+
+    reaction(out_port3_trigger) -> out_port3, out_port3_trigger {=
+        if len(self.pending_packets[3]) == 0:
+            return
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[3].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[3][0]
+        if next_ready_ns > current_ns:
+            out_port3_trigger.schedule(MSEC(max(int(math.ceil((next_ready_ns - current_ns) / 1000000.0)), 1)))
+            return
+        _, packet = self.pending_packets[3].pop(0)
+        out_port3.set(packet)
+        if len(self.pending_packets[3]) > 0:
+            out_port3_trigger.schedule(MSEC(max(int(math.ceil((self.pending_packets[3][0][0] - current_ns) / 1000000.0)), 0)))
+    =}
+
+    reaction(out_port4_trigger) -> out_port4, out_port4_trigger {=
+        if len(self.pending_packets[4]) == 0:
+            return
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[4].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[4][0]
+        if next_ready_ns > current_ns:
+            out_port4_trigger.schedule(MSEC(max(int(math.ceil((next_ready_ns - current_ns) / 1000000.0)), 1)))
+            return
+        _, packet = self.pending_packets[4].pop(0)
+        out_port4.set(packet)
+        if len(self.pending_packets[4]) > 0:
+            out_port4_trigger.schedule(MSEC(max(int(math.ceil((self.pending_packets[4][0][0] - current_ns) / 1000000.0)), 0)))
+    =}
+
+    reaction(out_port5_trigger) -> out_port5, out_port5_trigger {=
+        if len(self.pending_packets[5]) == 0:
+            return
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[5].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[5][0]
+        if next_ready_ns > current_ns:
+            out_port5_trigger.schedule(MSEC(max(int(math.ceil((next_ready_ns - current_ns) / 1000000.0)), 1)))
+            return
+        _, packet = self.pending_packets[5].pop(0)
+        out_port5.set(packet)
+        if len(self.pending_packets[5]) > 0:
+            out_port5_trigger.schedule(MSEC(max(int(math.ceil((self.pending_packets[5][0][0] - current_ns) / 1000000.0)), 0)))
+    =}
+
+    reaction(out_port6_trigger) -> out_port6, out_port6_trigger {=
+        if len(self.pending_packets[6]) == 0:
+            return
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[6].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[6][0]
+        if next_ready_ns > current_ns:
+            out_port6_trigger.schedule(MSEC(max(int(math.ceil((next_ready_ns - current_ns) / 1000000.0)), 1)))
+            return
+        _, packet = self.pending_packets[6].pop(0)
+        out_port6.set(packet)
+        if len(self.pending_packets[6]) > 0:
+            out_port6_trigger.schedule(MSEC(max(int(math.ceil((self.pending_packets[6][0][0] - current_ns) / 1000000.0)), 0)))
+    =}
+
+    reaction(out_port7_trigger) -> out_port7, out_port7_trigger {=
+        if len(self.pending_packets[7]) == 0:
+            return
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[7].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[7][0]
+        if next_ready_ns > current_ns:
+            out_port7_trigger.schedule(MSEC(max(int(math.ceil((next_ready_ns - current_ns) / 1000000.0)), 1)))
+            return
+        _, packet = self.pending_packets[7].pop(0)
+        out_port7.set(packet)
+        if len(self.pending_packets[7]) > 0:
+            out_port7_trigger.schedule(MSEC(max(int(math.ceil((self.pending_packets[7][0][0] - current_ns) / 1000000.0)), 0)))
+    =}
+
+    reaction(out_port8_trigger) -> out_port8, out_port8_trigger {=
+        if len(self.pending_packets[8]) == 0:
+            return
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[8].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[8][0]
+        if next_ready_ns > current_ns:
+            out_port8_trigger.schedule(MSEC(max(int(math.ceil((next_ready_ns - current_ns) / 1000000.0)), 1)))
+            return
+        _, packet = self.pending_packets[8].pop(0)
+        out_port8.set(packet)
+        if len(self.pending_packets[8]) > 0:
+            out_port8_trigger.schedule(MSEC(max(int(math.ceil((self.pending_packets[8][0][0] - current_ns) / 1000000.0)), 0)))
+    =}
+
+    reaction(out_port9_trigger) -> out_port9, out_port9_trigger {=
+        if len(self.pending_packets[9]) == 0:
+            return
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[9].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[9][0]
+        if next_ready_ns > current_ns:
+            out_port9_trigger.schedule(MSEC(max(int(math.ceil((next_ready_ns - current_ns) / 1000000.0)), 1)))
+            return
+        _, packet = self.pending_packets[9].pop(0)
+        out_port9.set(packet)
+        if len(self.pending_packets[9]) > 0:
+            out_port9_trigger.schedule(MSEC(max(int(math.ceil((self.pending_packets[9][0][0] - current_ns) / 1000000.0)), 0)))
+    =}
+
+    reaction(out_port10_trigger) -> out_port10, out_port10_trigger {=
+        if len(self.pending_packets[10]) == 0:
+            return
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[10].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[10][0]
+        if next_ready_ns > current_ns:
+            out_port10_trigger.schedule(MSEC(max(int(math.ceil((next_ready_ns - current_ns) / 1000000.0)), 1)))
+            return
+        _, packet = self.pending_packets[10].pop(0)
+        out_port10.set(packet)
+        if len(self.pending_packets[10]) > 0:
+            out_port10_trigger.schedule(MSEC(max(int(math.ceil((self.pending_packets[10][0][0] - current_ns) / 1000000.0)), 0)))
+    =}
+
+    reaction(out_port11_trigger) -> out_port11, out_port11_trigger {=
+        if len(self.pending_packets[11]) == 0:
+            return
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[11].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[11][0]
+        if next_ready_ns > current_ns:
+            out_port11_trigger.schedule(MSEC(max(int(math.ceil((next_ready_ns - current_ns) / 1000000.0)), 1)))
+            return
+        _, packet = self.pending_packets[11].pop(0)
+        out_port11.set(packet)
+        if len(self.pending_packets[11]) > 0:
+            out_port11_trigger.schedule(MSEC(max(int(math.ceil((self.pending_packets[11][0][0] - current_ns) / 1000000.0)), 0)))
+    =}
+
+    reaction(out_port12_trigger) -> out_port12, out_port12_trigger {=
+        if len(self.pending_packets[12]) == 0:
+            return
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[12].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[12][0]
+        if next_ready_ns > current_ns:
+            out_port12_trigger.schedule(MSEC(max(int(math.ceil((next_ready_ns - current_ns) / 1000000.0)), 1)))
+            return
+        _, packet = self.pending_packets[12].pop(0)
+        out_port12.set(packet)
+        if len(self.pending_packets[12]) > 0:
+            out_port12_trigger.schedule(MSEC(max(int(math.ceil((self.pending_packets[12][0][0] - current_ns) / 1000000.0)), 0)))
+    =}
+
+    reaction(out_port13_trigger) -> out_port13, out_port13_trigger {=
+        if len(self.pending_packets[13]) == 0:
+            return
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[13].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[13][0]
+        if next_ready_ns > current_ns:
+            out_port13_trigger.schedule(MSEC(max(int(math.ceil((next_ready_ns - current_ns) / 1000000.0)), 1)))
+            return
+        _, packet = self.pending_packets[13].pop(0)
+        out_port13.set(packet)
+        if len(self.pending_packets[13]) > 0:
+            out_port13_trigger.schedule(MSEC(max(int(math.ceil((self.pending_packets[13][0][0] - current_ns) / 1000000.0)), 0)))
+    =}
+
+    reaction(out_port14_trigger) -> out_port14, out_port14_trigger {=
+        if len(self.pending_packets[14]) == 0:
+            return
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[14].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[14][0]
+        if next_ready_ns > current_ns:
+            out_port14_trigger.schedule(MSEC(max(int(math.ceil((next_ready_ns - current_ns) / 1000000.0)), 1)))
+            return
+        _, packet = self.pending_packets[14].pop(0)
+        out_port14.set(packet)
+        if len(self.pending_packets[14]) > 0:
+            out_port14_trigger.schedule(MSEC(max(int(math.ceil((self.pending_packets[14][0][0] - current_ns) / 1000000.0)), 0)))
+    =}
+
+    reaction(out_port15_trigger) -> out_port15, out_port15_trigger {=
+        if len(self.pending_packets[15]) == 0:
+            return
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[15].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[15][0]
+        if next_ready_ns > current_ns:
+            out_port15_trigger.schedule(MSEC(max(int(math.ceil((next_ready_ns - current_ns) / 1000000.0)), 1)))
+            return
+        _, packet = self.pending_packets[15].pop(0)
+        out_port15.set(packet)
+        if len(self.pending_packets[15]) > 0:
+            out_port15_trigger.schedule(MSEC(max(int(math.ceil((self.pending_packets[15][0][0] - current_ns) / 1000000.0)), 0)))
+    =}
+
+    reaction(out_port16_trigger) -> out_port16, out_port16_trigger {=
+        if len(self.pending_packets[16]) == 0:
+            return
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[16].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[16][0]
+        if next_ready_ns > current_ns:
+            out_port16_trigger.schedule(MSEC(max(int(math.ceil((next_ready_ns - current_ns) / 1000000.0)), 1)))
+            return
+        _, packet = self.pending_packets[16].pop(0)
+        out_port16.set(packet)
+        if len(self.pending_packets[16]) > 0:
+            out_port16_trigger.schedule(MSEC(max(int(math.ceil((self.pending_packets[16][0][0] - current_ns) / 1000000.0)), 0)))
+    =}
+
+    reaction(out_port17_trigger) -> out_port17, out_port17_trigger {=
+        if len(self.pending_packets[17]) == 0:
+            return
+        current_ns = int(lf.time.logical_elapsed())
+        self.pending_packets[17].sort(key=lambda x: x[0])
+        next_ready_ns, _ = self.pending_packets[17][0]
+        if next_ready_ns > current_ns:
+            out_port17_trigger.schedule(MSEC(max(int(math.ceil((next_ready_ns - current_ns) / 1000000.0)), 1)))
+            return
+        _, packet = self.pending_packets[17].pop(0)
+        out_port17.set(packet)
+        if len(self.pending_packets[17]) > 0:
+            out_port17_trigger.schedule(MSEC(max(int(math.ceil((self.pending_packets[17][0][0] - current_ns) / 1000000.0)), 0)))
+    =}
+}
+
+main reactor(fast_enable = True) {
+    s = new HUScheduler(num_devices = 18, task_csv_path = "data/sample_simulation_16Jetson/Tasks.csv", dependency_csv_path = "data/sample_simulation_16Jetson/Dependencies.csv", bandwidth_csv_path = "data/sample_simulation_16Jetson/Bandwidth.csv")
+    r_1 = new ComputeDevice(device_index = 0, device_type_index = 0, device_name = "Jetson_1", bandwidth_csv_path = "data/sample_simulation_16Jetson/Bandwidth.csv", fast_enable = fast_enable)
+    r_2 = new ComputeDevice(device_index = 1, device_type_index = 0, device_name = "Jetson_2", bandwidth_csv_path = "data/sample_simulation_16Jetson/Bandwidth.csv", fast_enable = fast_enable)
+    r_3 = new ComputeDevice(device_index = 2, device_type_index = 0, device_name = "Jetson_3", bandwidth_csv_path = "data/sample_simulation_16Jetson/Bandwidth.csv", fast_enable = fast_enable)
+    r_4 = new ComputeDevice(device_index = 3, device_type_index = 0, device_name = "Jetson_4", bandwidth_csv_path = "data/sample_simulation_16Jetson/Bandwidth.csv", fast_enable = fast_enable)
+    r_5 = new ComputeDevice(device_index = 4, device_type_index = 0, device_name = "Jetson_5", bandwidth_csv_path = "data/sample_simulation_16Jetson/Bandwidth.csv", fast_enable = fast_enable)
+    r_6 = new ComputeDevice(device_index = 5, device_type_index = 0, device_name = "Jetson_6", bandwidth_csv_path = "data/sample_simulation_16Jetson/Bandwidth.csv", fast_enable = fast_enable)
+    r_7 = new ComputeDevice(device_index = 6, device_type_index = 0, device_name = "Jetson_7", bandwidth_csv_path = "data/sample_simulation_16Jetson/Bandwidth.csv", fast_enable = fast_enable)
+    r_8 = new ComputeDevice(device_index = 7, device_type_index = 0, device_name = "Jetson_8", bandwidth_csv_path = "data/sample_simulation_16Jetson/Bandwidth.csv", fast_enable = fast_enable)
+    r_9 = new ComputeDevice(device_index = 8, device_type_index = 0, device_name = "Jetson_9", bandwidth_csv_path = "data/sample_simulation_16Jetson/Bandwidth.csv", fast_enable = fast_enable)
+    r_10 = new ComputeDevice(device_index = 9, device_type_index = 0, device_name = "Jetson_10", bandwidth_csv_path = "data/sample_simulation_16Jetson/Bandwidth.csv", fast_enable = fast_enable)
+    r_11 = new ComputeDevice(device_index = 10, device_type_index = 0, device_name = "Jetson_11", bandwidth_csv_path = "data/sample_simulation_16Jetson/Bandwidth.csv", fast_enable = fast_enable)
+    r_12 = new ComputeDevice(device_index = 11, device_type_index = 0, device_name = "Jetson_12", bandwidth_csv_path = "data/sample_simulation_16Jetson/Bandwidth.csv", fast_enable = fast_enable)
+    r_13 = new ComputeDevice(device_index = 12, device_type_index = 0, device_name = "Jetson_13", bandwidth_csv_path = "data/sample_simulation_16Jetson/Bandwidth.csv", fast_enable = fast_enable)
+    r_14 = new ComputeDevice(device_index = 13, device_type_index = 0, device_name = "Jetson_14", bandwidth_csv_path = "data/sample_simulation_16Jetson/Bandwidth.csv", fast_enable = fast_enable)
+    r_15 = new ComputeDevice(device_index = 14, device_type_index = 0, device_name = "Jetson_15", bandwidth_csv_path = "data/sample_simulation_16Jetson/Bandwidth.csv", fast_enable = fast_enable)
+    r_16 = new ComputeDevice(device_index = 15, device_type_index = 0, device_name = "Jetson_16", bandwidth_csv_path = "data/sample_simulation_16Jetson/Bandwidth.csv", fast_enable = fast_enable)
+    r_17 = new ComputeDevice(device_index = 16, device_type_index = 1, device_name = "A6000", bandwidth_csv_path = "data/sample_simulation_16Jetson/Bandwidth.csv", fast_enable = fast_enable)
+    r_18 = new ComputeDevice(device_index = 17, device_type_index = 2, device_name = "Blackwell", bandwidth_csv_path = "data/sample_simulation_16Jetson/Bandwidth.csv", fast_enable = fast_enable)
+    n = new NetworkFabric16Jetson()
+    t = new TaskSetSource()
+    e = new EnvironmentUpdateDetector()
+    o = new OutputVisualizer16Jetson()
+
+    t.tasks, e.change -> s.tasks, s.change
+    e.change -> n.change
+
+    s.tasks_to_run -> r_1.tasks_to_run, r_2.tasks_to_run, r_3.tasks_to_run, r_4.tasks_to_run, r_5.tasks_to_run, r_6.tasks_to_run, r_7.tasks_to_run, r_8.tasks_to_run, r_9.tasks_to_run, r_10.tasks_to_run, r_11.tasks_to_run, r_12.tasks_to_run, r_13.tasks_to_run, r_14.tasks_to_run, r_15.tasks_to_run, r_16.tasks_to_run, r_17.tasks_to_run, r_18.tasks_to_run
+    s.communication_map -> r_1.communication_map, r_2.communication_map, r_3.communication_map, r_4.communication_map, r_5.communication_map, r_6.communication_map, r_7.communication_map, r_8.communication_map, r_9.communication_map, r_10.communication_map, r_11.communication_map, r_12.communication_map, r_13.communication_map, r_14.communication_map, r_15.communication_map, r_16.communication_map, r_17.communication_map, r_18.communication_map
+
+    r_1.out_port -> n.in_port0 after 1 ms
+    r_2.out_port -> n.in_port1 after 1 ms
+    r_3.out_port -> n.in_port2 after 1 ms
+    r_4.out_port -> n.in_port3 after 1 ms
+    r_5.out_port -> n.in_port4 after 1 ms
+    r_6.out_port -> n.in_port5 after 1 ms
+    r_7.out_port -> n.in_port6 after 1 ms
+    r_8.out_port -> n.in_port7 after 1 ms
+    r_9.out_port -> n.in_port8 after 1 ms
+    r_10.out_port -> n.in_port9 after 1 ms
+    r_11.out_port -> n.in_port10 after 1 ms
+    r_12.out_port -> n.in_port11 after 1 ms
+    r_13.out_port -> n.in_port12 after 1 ms
+    r_14.out_port -> n.in_port13 after 1 ms
+    r_15.out_port -> n.in_port14 after 1 ms
+    r_16.out_port -> n.in_port15 after 1 ms
+    r_17.out_port -> n.in_port16 after 1 ms
+    r_18.out_port -> n.in_port17 after 1 ms
+
+    n.out_port0 -> r_1.in_port after 1 ms
+    n.out_port1 -> r_2.in_port after 1 ms
+    n.out_port2 -> r_3.in_port after 1 ms
+    n.out_port3 -> r_4.in_port after 1 ms
+    n.out_port4 -> r_5.in_port after 1 ms
+    n.out_port5 -> r_6.in_port after 1 ms
+    n.out_port6 -> r_7.in_port after 1 ms
+    n.out_port7 -> r_8.in_port after 1 ms
+    n.out_port8 -> r_9.in_port after 1 ms
+    n.out_port9 -> r_10.in_port after 1 ms
+    n.out_port10 -> r_11.in_port after 1 ms
+    n.out_port11 -> r_12.in_port after 1 ms
+    n.out_port12 -> r_13.in_port after 1 ms
+    n.out_port13 -> r_14.in_port after 1 ms
+    n.out_port14 -> r_15.in_port after 1 ms
+    n.out_port15 -> r_16.in_port after 1 ms
+    n.out_port16 -> r_17.in_port after 1 ms
+    n.out_port17 -> r_18.in_port after 1 ms
+
+    r_1.final_output, r_2.final_output, r_3.final_output, r_4.final_output, r_5.final_output, r_6.final_output, r_7.final_output, r_8.final_output, r_9.final_output, r_10.final_output, r_11.final_output, r_12.final_output, r_13.final_output, r_14.final_output, r_15.final_output, r_16.final_output, r_17.final_output, r_18.final_output -> o.d0_output, o.d1_output, o.d2_output, o.d3_output, o.d4_output, o.d5_output, o.d6_output, o.d7_output, o.d8_output, o.d9_output, o.d10_output, o.d11_output, o.d12_output, o.d13_output, o.d14_output, o.d15_output, o.d16_output, o.d17_output
+    r_1.trace_output -> o.d0_trace
+    r_2.trace_output -> o.d1_trace
+    r_3.trace_output -> o.d2_trace
+    r_4.trace_output -> o.d3_trace
+    r_5.trace_output -> o.d4_trace
+    r_6.trace_output -> o.d5_trace
+    r_7.trace_output -> o.d6_trace
+    r_8.trace_output -> o.d7_trace
+    r_9.trace_output -> o.d8_trace
+    r_10.trace_output -> o.d9_trace
+    r_11.trace_output -> o.d10_trace
+    r_12.trace_output -> o.d11_trace
+    r_13.trace_output -> o.d12_trace
+    r_14.trace_output -> o.d13_trace
+    r_15.trace_output -> o.d14_trace
+    r_16.trace_output -> o.d15_trace
+    r_17.trace_output -> o.d16_trace
+    r_18.trace_output -> o.d17_trace
+}

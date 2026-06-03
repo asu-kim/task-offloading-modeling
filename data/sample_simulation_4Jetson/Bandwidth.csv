@@ -1,0 +1,7 @@
+,Jetson_1,Jetson_2,Jetson_3,Jetson_4,A6000,Blackwell
+Jetson_1,0,10,10,10,30,20
+Jetson_2,10,0,10,10,30,20
+Jetson_3,10,10,0,10,30,20
+Jetson_4,10,10,10,0,30,20
+A6000,30,30,30,30,0,25
+Blackwell,20,20,20,20,25,0
