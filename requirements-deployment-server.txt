@@ -1,0 +1,9 @@
+pandas
+matplotlib
+accelerate # LLM
+transformers # LLM
+tokenizers # LLM
+bitsandbytes>=0.43.0 # LLM
+ultralytics # ViT
+torch
+torchvision

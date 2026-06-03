@@ -1,0 +1,3 @@
+# WiP placeholder for Jetson deployment dependencies.
+# Jetson-specific package and CUDA/TensorRT versions will be added when
+# lib/deployment/Jetson.lf is finalized.
