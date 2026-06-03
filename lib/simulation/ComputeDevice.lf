@@ -29,6 +29,10 @@ reactor ComputeDevice(
     state trace_events = []
     state current_comp_start_time = 0.0
     state input_data
+    state received_parent_indexes
+    state started_task_indexes
+    state completed_task_indexes
+    state active_task_index = -1
     state pending_packets = []
     state bandwidth = []
     state sender_trace_next_sec = 0.0
@@ -45,6 +49,10 @@ reactor ComputeDevice(
 
     reaction(startup) {=
         self.input_data = {}
+        self.received_parent_indexes = {}
+        self.started_task_indexes = set()
+        self.completed_task_indexes = set()
+        self.active_task_index = -1
         self.sender_trace_next_sec = 0.0
         comm_df = pd.read_csv(project_path(self.bandwidth_csv_path), index_col=0)
         comm_df.columns = comm_df.columns.str.strip()
@@ -65,9 +73,14 @@ reactor ComputeDevice(
         self.pending_packets = []
         self.sender_trace_next_sec = 0.0
         self.input_data = {}
+        self.received_parent_indexes = {}
+        self.started_task_indexes = set()
+        self.completed_task_indexes = set()
+        self.active_task_index = -1
 
         for task in self.task_queue:
             self.input_data[task.name] = False
+            self.received_parent_indexes[task.index] = set()
             if len(task.parent_task_indexes) == 0 and task.source_device_index == self.device_index:
                 self.input_data[task.name] = True
 
@@ -115,14 +128,36 @@ reactor ComputeDevice(
         if isinstance(packet, dict) and "child_task" in packet:
             child_task = packet["child_task"]
             task_name = child_task.name
-            self.input_data[task_name] = True
+            self.received_parent_indexes.setdefault(child_task.index, set())
+            parent_task = packet.get("parent_task")
+            if parent_task is not None:
+                self.received_parent_indexes[child_task.index].add(parent_task.index)
+
+            required_parents = set(child_task.parent_task_indexes)
+            received_parents = self.received_parent_indexes[child_task.index]
+            if len(required_parents) == 0 or required_parents.issubset(received_parents):
+                self.input_data[task_name] = True
+
             for i, queued_task in enumerate(self.task_queue):
-                if queued_task.name == task_name and queued_task.index == child_task.index and i == self.current_task_index:
+                if (
+                    queued_task.name == task_name
+                    and queued_task.index == child_task.index
+                    and i == self.current_task_index
+                    and queued_task.index not in self.started_task_indexes
+                    and queued_task.index not in self.completed_task_indexes
+                    and self.active_task_index == -1
+                    and self.input_data.get(task_name, False)
+                ):
                     start_execution.schedule(0)
                     break
         else:
             task = packet
-            if self.input_data.get(task.name, False):
+            if (
+                self.input_data.get(task.name, False)
+                and task.index not in self.started_task_indexes
+                and task.index not in self.completed_task_indexes
+                and self.active_task_index == -1
+            ):
                 start_execution.schedule(0)
     =}
 
@@ -130,18 +165,30 @@ reactor ComputeDevice(
         if self.current_task_index >= len(self.task_queue):
             return
         task = self.task_queue[self.current_task_index]
+        if task.index in self.started_task_indexes or task.index in self.completed_task_indexes:
+            return
         if not self.input_data.get(task.name, False):
+            return
+        if self.active_task_index != -1:
             return
         elapsed_logical_time = lf.time.logical_elapsed()
         self.current_comp_start_time = elapsed_logical_time / 1e9
         exec_time_ms = task.execution_times[self.device_type_index]
+        self.started_task_indexes.add(task.index)
+        self.active_task_index = task.index
         if self.fast_enable != True:
             time.sleep(exec_time_ms / 1000.0)
         end_execution.schedule(MSEC(int(exec_time_ms)))
     =}
 
     reaction(end_execution) -> start_execution, send_packet, final_output, trace_output {=
+        if self.current_task_index >= len(self.task_queue):
+            return
         completed_task = self.task_queue[self.current_task_index]
+        if completed_task.index in self.completed_task_indexes:
+            return
+        if self.active_task_index != completed_task.index:
+            return
         task_index = completed_task.index
         end_time_sec = lf.time.logical_elapsed() / 1e9
         end_ms = end_time_sec * 1000.0
@@ -190,14 +237,25 @@ reactor ComputeDevice(
             for child_task_index in completed_task.child_task_indexes:
                 for queued_task in self.task_queue:
                     if child_task_index == queued_task.index:
-                        self.input_data[queued_task.name] = True
+                        self.received_parent_indexes.setdefault(child_task_index, set()).add(completed_task.index)
+                        required_parents = set(queued_task.parent_task_indexes)
+                        received_parents = self.received_parent_indexes[child_task_index]
+                        if len(required_parents) == 0 or required_parents.issubset(received_parents):
+                            self.input_data[queued_task.name] = True
 
+        self.completed_task_indexes.add(completed_task.index)
+        self.active_task_index = -1
         self.current_task_index += 1
         if self.current_task_index >= len(self.task_queue):
             trace_output.set(self.trace_events)
         else:
             task = self.task_queue[self.current_task_index]
-            if self.input_data.get(task.name, False):
+            if (
+                self.input_data.get(task.name, False)
+                and task.index not in self.started_task_indexes
+                and task.index not in self.completed_task_indexes
+                and self.active_task_index == -1
+            ):
                 start_execution.schedule(0)
     =}
 
