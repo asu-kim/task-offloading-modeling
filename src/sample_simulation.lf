@@ -1,8 +1,8 @@
-target Python
+target Python {
+    fast: true
+}
 
-import Jetson from "../lib/simulation/MobileRobot.lf"
-import A6000 from "../lib/simulation/Edge.lf"
-import Blackwell from "../lib/simulation/Cloudlet.lf"
+import ComputeDevice from "../lib/simulation/ComputeDevice.lf"
 
 preamble {=
     import sys
@@ -1552,11 +1552,11 @@ reactor NetworkFabric {
     =}
 }
 
-main reactor {
+main reactor(fast_enable = True) {
     s = new Scheduler()
-    r_1 = new Jetson()
-    r_2 = new A6000()
-    r_3 = new Blackwell()
+    r_1 = new ComputeDevice(device_index = 0, device_type_index = 0, device_name = "Jetson", bandwidth_csv_path = "Bandwidth.csv", fast_enable = fast_enable)
+    r_2 = new ComputeDevice(device_index = 1, device_type_index = 1, device_name = "A6000", bandwidth_csv_path = "Bandwidth.csv", fast_enable = fast_enable)
+    r_3 = new ComputeDevice(device_index = 2, device_type_index = 2, device_name = "Blackwell", bandwidth_csv_path = "Bandwidth.csv", fast_enable = fast_enable)
     // v = new Visulizer()
     // sr = new SchedulingResult()
     n = new NetworkFabric()

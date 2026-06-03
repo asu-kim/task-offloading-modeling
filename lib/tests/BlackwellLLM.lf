@@ -11,7 +11,7 @@ preamble {=
 
     time_unit = 1
 
-    cloudlet_llm_default_question = "What is the capital of South Korea?"
+    cloudlet_llm_default_question = "What is the opposite of tall?"
     cloudlet_llm_default_model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     _cloudlet_llm_tokenizer = None
     _cloudlet_llm_model = None

@@ -5,8 +5,8 @@ preamble {=
     time_unit = 1
 =}
 
-reactor A6000(device_index = 1, device_name = "A6000") {
-    // state execution_time = [2, 4]
+reactor Blackwell(device_index = 2, device_name = "Blackwell", fast_enable = True) {
+    // state execution_time = [3, 5]
     state task_queue = []
     state tasks = []
     state current_task_index = 0
@@ -16,16 +16,14 @@ reactor A6000(device_index = 1, device_name = "A6000") {
     input tasks_to_run
     input communication_map
     input in_port
+    // input recv_a6000
     // input recv_agx
-    // input recv_blackwell
     logical action start_execution
     logical action end_execution
     logical action send_packet
+    // output send_a6000
     // output send_agx
-    // output send_blackwell
     output out_port
-    output final_output
-    output trace_output
 
     state input_data
     state output_data
@@ -46,19 +44,20 @@ reactor A6000(device_index = 1, device_name = "A6000") {
                 v = comm_df.iloc[i, j]
                 self.bandwidth[i][j] = int(v) if not pd.isna(v) else 0
     =}
+    output final_output
+    output trace_output
 
     reaction(tasks_to_run, communication_map) -> start_execution, trace_output {=
-        # TODO: the contents can be array depending on the number of parent
         self.input_data = {"VIT1": False, "VIT2": False, "LLM1": False, "LLM2": False}
         self.output_data = {"VIT1": None, "VIT2": None, "LLM1": False, "LLM2": False}
 
         # Receive the tasks to run and communication map
         # Schedule the communication as well
-        print("In A6000")
+        print("In Blackwell")
         self.task_queue = tasks_to_run.value
         self.comm_map = communication_map.value if communication_map.is_present else {}
         print(self.task_queue)
-        print(f"A6000 communication map: {self.comm_map}")
+        print(f"Blackwell communication map: {self.comm_map}")
         print("")
 
         if len(self.task_queue) == 0:
@@ -70,7 +69,7 @@ reactor A6000(device_index = 1, device_name = "A6000") {
         task_name = task.name
         if self.input_data[task_name] is True:
             # schedule
-            print(f"A6000: Schedule task {task_name} at logical time {lf.time.logical_elapsed()}")
+            print(f"Blackwell: Schedule task {task_name} at logical time {lf.time.logical_elapsed()}")
             start_execution.schedule(0)
     =}
 
@@ -93,9 +92,9 @@ reactor A6000(device_index = 1, device_name = "A6000") {
             task_name = child_task.name
             
             if is_source_input:
-                print(f"A6000: Received initial input data for source task {task_name}")
+                print(f"Blackwell: Received initial input data for source task {task_name}")
             else:
-                print(f"A6000: Received output from parent task {parent_task.name if parent_task else 'unknown'} "
+                print(f"Blackwell: Received output from parent task {parent_task.name if parent_task else 'unknown'} "
                       f"for child task {task_name}")
             
             # Mark that input data is ready for this child task
@@ -110,7 +109,7 @@ reactor A6000(device_index = 1, device_name = "A6000") {
                     if self.input_data[task_name] is True:
                         # Make sure we're at the right position or update current_task_index
                         if i == self.current_task_index:
-                            print(f"A6000: Scheduling task {task_name} at logical time {lf.time.logical_elapsed()}")
+                            print(f"Blackwell: Scheduling task {task_name} at logical time {lf.time.logical_elapsed()}")
                             start_execution.schedule(0)
                         break
         else:
@@ -118,7 +117,7 @@ reactor A6000(device_index = 1, device_name = "A6000") {
             task = packet
             task_name = task.name
             if task_name in self.input_data and self.input_data[task_name] is True:
-                print(f"A6000: Schedule task {task_name} at logical time {lf.time.logical_elapsed()}")
+                print(f"Blackwell: Schedule task {task_name} at logical time {lf.time.logical_elapsed()}")
                 start_execution.schedule(0)
     =}
 
@@ -129,15 +128,16 @@ reactor A6000(device_index = 1, device_name = "A6000") {
         # Keep execution deterministic for trace generation; do not tighten runtime deadline dynamically.
 
         task = self.task_queue[self.current_task_index]
-        print(f"A6000: Execute task {task.name}")
-        print(f"A6000: Tag = ({elapsed_logical_time}, {lf.tag().microstep}) and physical time = {elapsed_physicl_time}")
+        print(f"Blackwell: Execute task {task.name}")
+        print(f"Blackwell: Tag = ({elapsed_logical_time}, {lf.tag().microstep}) and physical time = {elapsed_physicl_time}")
         exec_time_ms = task.execution_times[self.device_index]
-        time.sleep(exec_time_ms / 1000.0 / time_unit)
-        self.check_deadline()
+        if self.fast_enable != True:
+            time.sleep(exec_time_ms / 1000.0 / time_unit)
+        # self.check_deadline()
         end_execution.schedule(MSEC(int(exec_time_ms)))
         # self.update_deadline(FOREVER)
     =} deadline(10 sec) {=
-        print("In A6000's deadline handler.")
+        print("In Blackwell's deadline handler.")
         elapsed_logical_time = lf.time.logical_elapsed()
         elapsed_physicl_time = lf.time.physical_elapsed()
         print(f"Logical time = {elapsed_logical_time} and physical time = {elapsed_physicl_time}")
@@ -196,25 +196,25 @@ reactor A6000(device_index = 1, device_name = "A6000") {
                     "output_size": output_size
                 }
 
-                print(f"A6000: Task {completed_task.name} (index {task_index}) completed. "
+                print(f"Blackwell: Task {completed_task.name} (index {task_index}) completed. "
                       f"Sending output to child task {child_task.name} (index {child_index}) "
                       f"on device {destination_device}")
                 self.pending_packets.append(comm_packet)
 
         if len(self.pending_packets) > 0:
             send_packet.schedule(0)
-        
+
         # Mark input data ready for any child tasks that are in this device's task_queue
         if completed_task.child_task_indexes:
             for child_task_index in completed_task.child_task_indexes:
                 for queued_task in self.task_queue:
                     if child_task_index == queued_task.index:
                         self.input_data[queued_task.name] = True
-
+        
         self.current_task_index += 1
 
         if self.current_task_index >= len(self.task_queue):
-            print(f"A6000: finish executing all scheduled tasks")
+            print(f"Blackwell: finish executing all scheduled tasks")
             trace_output.set(self.trace_events)
         else:
             # Schedule next execution if input data is ready

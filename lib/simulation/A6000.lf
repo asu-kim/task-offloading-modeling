@@ -5,23 +5,23 @@ preamble {=
     time_unit = 1
 =}
 
-reactor Jetson(device_index = 0, device_name = "Jetson") {
-    // state execution_time = [4, 8]
+reactor A6000(device_index = 1, device_name = "A6000", fast_enable = True) {
+    // state execution_time = [2, 4]
     state task_queue = []
     state tasks = []
     state current_task_index = 0
-    state comm_map  // Communication map: {task_index: {child_index: {destination_device, child_task, output_size}}}
+    state comm_map // Communication map: {task_index: {child_index: {destination_device, child_task, output_size}}}
     state trace_events = []
     state current_comp_start_time = 0.0
     input tasks_to_run
     input communication_map
     input in_port
-    // input recv_a6000
+    // input recv_agx
     // input recv_blackwell
     logical action start_execution
     logical action end_execution
     logical action send_packet
-    // output send_a6000
+    // output send_agx
     // output send_blackwell
     output out_port
     output final_output
@@ -34,11 +34,7 @@ reactor Jetson(device_index = 0, device_name = "Jetson") {
     state sender_trace_next_sec = 0.0
 
     reaction(startup) {=
-        self.input_data = {"VIT1": True, "VIT2": True, "LLM1": False, "LLM2": False}
-        self.output_data = {"VIT1": None, "VIT2": None, "LLM1": False, "LLM2": False}
         self.sender_trace_next_sec = 0.0
-
-        # Load bandwidth matrix for communication-trace timing.
         bandwidth_csv_path = str(Path(__file__).resolve().parents[2] / "Bandwidth.csv")
         comm_df = pd.read_csv(bandwidth_csv_path, index_col=0)
         comm_df.columns = comm_df.columns.str.strip()
@@ -51,55 +47,19 @@ reactor Jetson(device_index = 0, device_name = "Jetson") {
                 self.bandwidth[i][j] = int(v) if not pd.isna(v) else 0
     =}
 
-    reaction(tasks_to_run, communication_map) -> start_execution, send_packet, trace_output {=
+    reaction(tasks_to_run, communication_map) -> start_execution, trace_output {=
+        # TODO: the contents can be array depending on the number of parent
+        self.input_data = {"VIT1": False, "VIT2": False, "LLM1": False, "LLM2": False}
+        self.output_data = {"VIT1": None, "VIT2": None, "LLM1": False, "LLM2": False}
+
         # Receive the tasks to run and communication map
         # Schedule the communication as well
-        print("In Jetson")
+        print("In A6000")
         self.task_queue = tasks_to_run.value
         self.comm_map = communication_map.value if communication_map.is_present else {}
         print(self.task_queue)
-        print(f"Jetson communication map: {self.comm_map}")
+        print(f"A6000 communication map: {self.comm_map}")
         print("")
-
-        # Check for source tasks that need initial input data sent to other devices
-        if isinstance(self.comm_map, dict):
-            for task_index, comm_entries in self.comm_map.items():
-                if isinstance(comm_entries, dict) and "source_input" in comm_entries:
-                    comm_info = comm_entries["source_input"]
-                    destination_device = comm_info["destination_device"]
-                    child_task = comm_info["child_task"]
-                    input_size = comm_info.get("input_size", 0)
-                    
-                    bw = self.bandwidth[self.device_index][destination_device] if self.bandwidth else 0
-                    transfer_ms = transfer_time_ms(input_size, bw) if bw > 0 else 0
-                    trace_send_time_sec = max(self.sender_trace_next_sec, lf.time.logical_elapsed() / 1e9)
-
-                    # Record communication send in trace
-                    self.trace_events.append({
-                        "type": "comm_send",
-                        "task_name": child_task.name,
-                        "from_device": self.device_index,
-                        "to_device": destination_device,
-                        "start_time": trace_send_time_sec,
-                        "output_size": input_size
-                    })
-                    self.sender_trace_next_sec = trace_send_time_sec + (transfer_ms / 1000.0)
-
-                    # Create a communication packet for initial input data
-                    comm_packet = {
-                        "destination_device": destination_device,
-                        "child_task": child_task,
-                        "parent_task": None,  # No parent for source input
-                        "input_size": input_size,
-                        "is_source_input": True
-                    }
-                    
-                    print(f"Jetson: Sending initial input data for source task {child_task.name} (index {task_index}) "
-                          f"to device {destination_device}")
-                    self.pending_packets.append(comm_packet)
-
-        if len(self.pending_packets) > 0:
-            send_packet.schedule(0)
 
         if len(self.task_queue) == 0:
             trace_output.set(self.trace_events)
@@ -107,15 +67,15 @@ reactor Jetson(device_index = 0, device_name = "Jetson") {
 
         # Schedule execution if input data is ready
         task = self.task_queue[self.current_task_index]
-        print(f"current task's child tasks = {task.child_task_indexes}")
         task_name = task.name
         if self.input_data[task_name] is True:
             # schedule
-            print(f"Jetson: Schedule task {task_name} at logical time {lf.time.logical_elapsed()}")
+            print(f"A6000: Schedule task {task_name} at logical time {lf.time.logical_elapsed()}")
             start_execution.schedule(0)
     =}
 
-    // reaction(recv_a6000, recv_blackwell) {=
+    // reaction(recv_agx, recv_blackwell) {=
+    //     # TODO: run the scheduled tasks when the input data is coming.
     //     # if not task_name.is_present or not input_data.is_present:
     //     #     sys.stderr.write("ERROR: Both should be present.\n")
     //     #     exit(1)
@@ -129,10 +89,14 @@ reactor Jetson(device_index = 0, device_name = "Jetson") {
             # This is a communication packet from another device
             child_task = packet["child_task"]
             parent_task = packet.get("parent_task")
+            is_source_input = packet.get("is_source_input", False)
             task_name = child_task.name
             
-            print(f"Jetson: Received output from parent task {parent_task.name if parent_task else 'unknown'} "
-                  f"for child task {task_name}")
+            if is_source_input:
+                print(f"A6000: Received initial input data for source task {task_name}")
+            else:
+                print(f"A6000: Received output from parent task {parent_task.name if parent_task else 'unknown'} "
+                      f"for child task {task_name}")
             
             # Mark that input data is ready for this child task
             if task_name not in self.input_data:
@@ -146,7 +110,7 @@ reactor Jetson(device_index = 0, device_name = "Jetson") {
                     if self.input_data[task_name] is True:
                         # Make sure we're at the right position or update current_task_index
                         if i == self.current_task_index:
-                            print(f"Jetson: Scheduling task {task_name} at logical time {lf.time.logical_elapsed()}")
+                            print(f"A6000: Scheduling task {task_name} at logical time {lf.time.logical_elapsed()}")
                             start_execution.schedule(0)
                         break
         else:
@@ -154,7 +118,7 @@ reactor Jetson(device_index = 0, device_name = "Jetson") {
             task = packet
             task_name = task.name
             if task_name in self.input_data and self.input_data[task_name] is True:
-                print(f"Jetson: Schedule task {task_name} at logical time {lf.time.logical_elapsed()}")
+                print(f"A6000: Schedule task {task_name} at logical time {lf.time.logical_elapsed()}")
                 start_execution.schedule(0)
     =}
 
@@ -165,23 +129,22 @@ reactor Jetson(device_index = 0, device_name = "Jetson") {
         # Keep execution deterministic for trace generation; do not tighten runtime deadline dynamically.
 
         task = self.task_queue[self.current_task_index]
-        print(f"Jetson: Execute task {task.name}")
-        print(f"Jetson: Tag = ({elapsed_logical_time}, {lf.tag().microstep}) and physical time = {elapsed_physicl_time}")
+        print(f"A6000: Execute task {task.name}")
+        print(f"A6000: Tag = ({elapsed_logical_time}, {lf.tag().microstep}) and physical time = {elapsed_physicl_time}")
         exec_time_ms = task.execution_times[self.device_index]
-        time.sleep(exec_time_ms / 1000.0 / time_unit)
-        # self.check_deadline()
-        print("Jetson: Schedule end_execution")
+        if self.fast_enable != True:
+            time.sleep(exec_time_ms / 1000.0 / time_unit)
+        self.check_deadline()
         end_execution.schedule(MSEC(int(exec_time_ms)))
         # self.update_deadline(FOREVER)
     =} deadline(10 sec) {=
-        print("In Jetson's deadline handler.")
+        print("In A6000's deadline handler.")
         elapsed_logical_time = lf.time.logical_elapsed()
         elapsed_physicl_time = lf.time.physical_elapsed()
         print(f"Logical time = {elapsed_logical_time} and physical time = {elapsed_physicl_time}")
     =}
 
     reaction(end_execution) -> start_execution, send_packet, final_output, trace_output {=
-        print("In Jetson: Send output data if needed.")
         # Get the completed task
         completed_task = self.task_queue[self.current_task_index]
         task_index = completed_task.index
@@ -233,29 +196,29 @@ reactor Jetson(device_index = 0, device_name = "Jetson") {
                     "parent_task": completed_task,
                     "output_size": output_size
                 }
-                
-                print(f"Jetson: Task {completed_task.name} (index {task_index}) completed. "
+
+                print(f"A6000: Task {completed_task.name} (index {task_index}) completed. "
                       f"Sending output to child task {child_task.name} (index {child_index}) "
                       f"on device {destination_device}")
                 self.pending_packets.append(comm_packet)
 
         if len(self.pending_packets) > 0:
             send_packet.schedule(0)
-
+        
         # Mark input data ready for any child tasks that are in this device's task_queue
         if completed_task.child_task_indexes:
             for child_task_index in completed_task.child_task_indexes:
                 for queued_task in self.task_queue:
                     if child_task_index == queued_task.index:
                         self.input_data[queued_task.name] = True
-        
-        # Schedule next execution if input data is ready
+
         self.current_task_index += 1
 
         if self.current_task_index >= len(self.task_queue):
-            print(f"Jetson: finish executing all scheduled tasks")
+            print(f"A6000: finish executing all scheduled tasks")
             trace_output.set(self.trace_events)
         else:
+            # Schedule next execution if input data is ready
             task = self.task_queue[self.current_task_index]
             task_name = task.name
             if self.input_data[task_name] is True:

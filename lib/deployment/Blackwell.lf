@@ -38,8 +38,8 @@ preamble {=
         comm_channel_available: int = 0
         comm_queue: list[Tuple[str, int, int]] = field(default_factory=list)
 
-    cloudlet_llm_default_question = "What is the capital of South Korea?"
-    cloudlet_llm_default_model_id = "meta-llama/Llama-2-7b-chat-hf"
+    cloudlet_llm_default_question = "What is the opposite of tall?"
+    cloudlet_llm_default_model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     _cloudlet_llm_tokenizer = None
     _cloudlet_llm_model = None
     _cloudlet_llm_generation = None
@@ -158,6 +158,47 @@ preamble {=
             else:
                 snapshot[key] = value
         return snapshot
+
+    def _attach_parent_yolos_output(packet, completed_task):
+        if not isinstance(packet, dict) or completed_task is None:
+            return
+
+        yolos_fields = {
+            "parent_yolos_input": getattr(completed_task, "yolos_input", None),
+            "parent_yolos_inference_ms": getattr(completed_task, "yolos_inference_ms", None),
+            "parent_yolos_speed": getattr(completed_task, "yolos_speed", None),
+            "parent_yolos_detection_count": getattr(completed_task, "yolos_detection_count", None),
+            "parent_yolos_detections": getattr(completed_task, "yolos_detections", None),
+        }
+        if not any(value is not None for value in yolos_fields.values()):
+            return
+
+        for key, value in yolos_fields.items():
+            packet[key] = value
+
+    def _log_received_parent_yolos_output(reactor, packet):
+        if not isinstance(packet, dict):
+            return
+
+        payload = {
+            "input": packet.get("parent_yolos_input"),
+            "inference_ms": packet.get("parent_yolos_inference_ms"),
+            "speed": packet.get("parent_yolos_speed"),
+            "detection_count": packet.get("parent_yolos_detection_count"),
+            "detections": packet.get("parent_yolos_detections"),
+        }
+        if not any(value is not None for value in payload.values()):
+            return
+
+        parent_task = packet.get("parent_task")
+        next_task = packet.get("task")
+        parent_name = getattr(parent_task, "name", "<unknown>")
+        next_name = getattr(next_task, "name", "<unknown>")
+        print(
+            f"{reactor.device_name}: Received YOLOS payload from {parent_name} for {next_name}:\n"
+            f"{pprint.pformat(payload, sort_dicts=False)}",
+            flush=True,
+        )
 
     def _dummy_llm_config(task):
         return {
@@ -642,7 +683,7 @@ preamble {=
         has_cuda = torch.cuda.is_available()
         dtype = torch.bfloat16 if has_cuda else torch.float32
 
-        print(f"Blackwell: Loading 7B LLM model {model_id}", flush=True)
+        print(f"Blackwell: Loading LLM model {model_id}", flush=True)
         if not has_cuda:
             print("Blackwell: CUDA is not available; loading LLM on CPU.", flush=True)
 
@@ -685,7 +726,7 @@ preamble {=
         )
         _cloudlet_llm_has_cuda = has_cuda
         _cloudlet_llm_torch = torch
-        print("Blackwell: 7B LLM model ready.", flush=True)
+        print("Blackwell: LLM model ready.", flush=True)
 
     def _run_cloudlet_llm(question):
         with _cloudlet_llm_lock:
@@ -906,6 +947,7 @@ reactor Blackwell(device_index = 2, device_name = "Blackwell", dummy_task = True
         for continuation in completed_packet.get("continuations", []):
             next_packet = dict(continuation)
             next_packet["parent_task"] = completed_task
+            _attach_parent_yolos_output(next_packet, completed_task)
             if _is_llm_task(completed_task):
                 next_packet["parent_llm_answer"] = getattr(completed_task, "llm_answer", None)
             destination_device = next_packet.get("device")
@@ -989,6 +1031,7 @@ reactor Blackwell(device_index = 2, device_name = "Blackwell", dummy_task = True
         for packet in packets:
             if isinstance(packet, dict) and packet.get("device") == self.device_index:
                 _record_arrived_packet(self, packet)
+                _log_received_parent_yolos_output(self, packet)
                 _accept_chain_packet(self, packet)
             else:
                 self.pending_packets.append(packet)
