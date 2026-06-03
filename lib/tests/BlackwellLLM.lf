@@ -12,7 +12,7 @@ preamble {=
     time_unit = 1
 
     cloudlet_llm_default_question = "What is the capital of South Korea?"
-    cloudlet_llm_default_model_id = "meta-llama/Llama-2-7b-chat-hf"
+    cloudlet_llm_default_model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     _cloudlet_llm_tokenizer = None
     _cloudlet_llm_model = None
     _cloudlet_llm_generation = None
@@ -35,9 +35,9 @@ preamble {=
 
         model_id = os.environ.get("CLOUDLET_LLM_MODEL_ID", cloudlet_llm_default_model_id)
         has_cuda = torch.cuda.is_available()
-        dtype = torch.bfloat16 if has_cuda else torch.float32
+        dtype = torch.float16 if has_cuda else torch.float32
 
-        print(f"Blackwell: Loading 7B LLM model {model_id}", flush=True)
+        print(f"Blackwell: Loading LLM model {model_id}", flush=True)
         if not has_cuda:
             print("Blackwell: CUDA is not available; loading LLM on CPU.", flush=True)
 
@@ -51,7 +51,7 @@ preamble {=
             low_cpu_mem_usage=True,
         )
 
-        use_4bit = has_cuda and os.environ.get("CLOUDLET_LLM_DISABLE_4BIT", "0").lower() not in ["1", "true", "yes"]
+        use_4bit = has_cuda and os.environ.get("CLOUDLET_LLM_ENABLE_4BIT", "0").lower() in ["1", "true", "yes"]
         if use_4bit:
             try:
                 import bitsandbytes as bnb
@@ -80,7 +80,7 @@ preamble {=
         )
         _cloudlet_llm_has_cuda = has_cuda
         _cloudlet_llm_torch = torch
-        print("Blackwell: 7B LLM model ready.", flush=True)
+        print("Blackwell: LLM model ready.", flush=True)
 
     def _run_cloudlet_llm(question):
         with _cloudlet_llm_lock:
