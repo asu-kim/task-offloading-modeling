@@ -1147,17 +1147,19 @@ reactor Scheduler {
 }
 
 reactor TaskDistributor {
-    input change
-    input network_info
+    // input change
+    // input network_info
 
     output[3] task_chains
 
+    e = new EnvironmentUpdateDetector()
     t = new TaskSetSource()
     s = new Scheduler()
 
+    
     t.tasks -> s.tasks
-    change -> s.change
-    network_info -> s.network_info
+    e.change -> s.change
+    e.network_info -> s.network_info
     s.task_chains -> task_chains
 }
 
@@ -1429,18 +1431,18 @@ reactor OutputVisualizer(bandwidth_csv_path = "Bandwidth.csv") {
 // main reactor {
 // federated reactor at localhost {
 federated reactor at 10.218.100.78 {
-    @maxwait(5 sec)
+    // @maxwait(5 sec)
     d = new TaskDistributor()
     r_1 = new Jetson()
     r_2 = new A6000()
     r_3 = new Blackwell(dummy_task = False)
 
-    e = new EnvironmentUpdateDetector()
-    @maxwait(5 sec)
+    // e = new EnvironmentUpdateDetector()
+    // @maxwait(5 sec)
     o = new OutputVisualizer()
 
-    e.change -> d.change
-    e.network_info -> d.network_info
+    // e.change -> d.change
+    // e.network_info -> d.network_info
     // e.network_info -> r_1.network_info
     // e.network_info -> r_2.network_info
     // e.network_info -> r_3.network_info
