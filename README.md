@@ -261,10 +261,3 @@ lfc src/ViTTest.lf
 Run the generated federates from `fed-gen/ViTTest/`.
 
 The current vision test uses an image from `dataset128/coco128/images/train2017/`.
-
-## Current Status
-
-- Simulation support is available and produces a scheduling trace figure.
-- Federated deployment support is available for server-side execution flows.
-- Blackwell includes LLM and vision execution paths for focused tests.
-- Jetson deployment support is incomplete and currently documented as a placeholder.
