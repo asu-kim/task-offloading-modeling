@@ -786,7 +786,7 @@ preamble {=
 
 =}
 
-reactor Blackwell(device_index = 2, device_name = "Blackwell", dummy_task = True) {
+reactor Blackwell(device_index = 2, device_name = "Blackwell", dummy_task = False) {
     state task_queue = []
     state current_packet
     state pending_task_packets

@@ -786,7 +786,7 @@ preamble {=
 
 =}
 
-reactor Jetson(device_index = 0, device_name = "Jetson", dummy_task = True) {
+reactor Jetson(device_index = 0, device_name = "Jetson", dummy_task = False) {
     state task_queue = []
     state current_packet
     state pending_task_packets

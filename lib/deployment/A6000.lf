@@ -786,7 +786,7 @@ preamble {=
 
 =}
 
-reactor A6000(device_index = 1, device_name = "A6000", dummy_task = True) {
+reactor A6000(device_index = 1, device_name = "A6000", dummy_task = False) {
     state task_queue = []
     state current_packet
     state pending_task_packets
