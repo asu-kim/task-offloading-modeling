@@ -1411,7 +1411,7 @@ reactor OutputVisualizer(bandwidth_csv_path = "data/sample_deployment/Bandwidth.
         handles.append(Line2D([0], [0], color="0.35", linestyle="--", lw=1.5, label="Deadline"))
         ax.legend(handles=handles, title="Task types")
         plt.tight_layout()
-        out_path = project_path("schedule_trace_deployment.png")
+        out_path = project_path("schedule_trace_deployment_deterministic.png")
         plt.savefig(out_path, dpi=150)
         plt.close(fig)
         print(f"OutputVisualizer: Wrote {out_path}. Stopping deployment run.", flush=True)
