@@ -556,7 +556,7 @@ preamble {=
     job_assignments: List[Dict] = []
     # Scheduler selection in file (no CLI argument required).
     # Allowed values: "HEFT", "HU"
-    scheduler_mode = "HU"
+    scheduler_mode = "HEFT"
 
     # Scheduler function pointer
     scheduler = hu_scheduler if scheduler_mode == "HU" else heft_scheduler
