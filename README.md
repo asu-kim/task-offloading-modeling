@@ -198,7 +198,13 @@ Compile:
 lfc src/sample_deployment.lf
 ```
 
-Run the generated federates from `fed-gen/sample_deployment/` according to your deployment host configuration in `src/sample_deployment.lf`. The generated folder includes the RTI and per-federate executables.
+Run the generated federates from `fed-gen/sample_deployment/`. The generated folder includes the RTI and per-federate executables.
+
+Before running a distributed deployment, update the `federated reactor at ...` host in your deployment file (for example `src/sample_deployment.lf` or `src/sample_deployment_deterministic.lf`):
+
+- The repository default is `localhost` (safe/local placeholder).
+- Replace `localhost` with the IP address of the machine where the RTI process will run.
+- Use the same RTI host IP for all participating federates.
 
 Expected result:
 

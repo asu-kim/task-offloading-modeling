@@ -1420,8 +1420,7 @@ reactor OutputVisualizer(bandwidth_csv_path = "data/sample_deployment/Bandwidth.
 }
 
 // main reactor {
-// federated reactor at localhost {
-federated reactor at 10.218.100.78 {
+federated reactor at localhost {
     // @maxwait(5 sec)
     d = new TaskDistributor()
     r_1 = new Jetson()

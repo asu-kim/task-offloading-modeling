@@ -19,7 +19,7 @@ reactor Mac {
     =}
 }
 
-federated reactor at 10.218.101.78 {
+federated reactor at localhost {
     b = new Blackwell()
     m = new Mac()
     m.out -> b.in1
