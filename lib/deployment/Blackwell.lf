@@ -176,6 +176,33 @@ preamble {=
         for key, value in yolos_fields.items():
             packet[key] = value
 
+    def _assign_packet_image(packet, image_ref):
+        if not isinstance(packet, dict) or not image_ref:
+            return
+        packet["input_image"] = image_ref
+        packet["image_path"] = image_ref
+
+    def _pick_transfer_image(reactor, packet=None, completed_task=None):
+        if isinstance(packet, dict):
+            for key in ["input_image", "image_path", "parent_yolos_input"]:
+                value = packet.get(key)
+                if value:
+                    return value
+
+        if completed_task is not None:
+            for attr in ["input_image", "image_path", "yolos_input"]:
+                value = getattr(completed_task, attr, None)
+                if value:
+                    return value
+
+        imgsz = _blackwell_yolos_imgsz()
+        _, input_label = _blackwell_next_yolos_input(imgsz)
+        return input_label
+
+    def _attach_transfer_image(reactor, packet, completed_task=None):
+        image_ref = _pick_transfer_image(reactor, packet=packet, completed_task=completed_task)
+        _assign_packet_image(packet, image_ref)
+
     def _log_received_parent_yolos_output(reactor, packet):
         if not isinstance(packet, dict):
             return
@@ -643,6 +670,8 @@ preamble {=
         speed = result["speed"]
 
         task.yolos_input = input_label
+        task.input_image = input_label
+        task.image_path = input_label
         task.yolos_inference_ms = inference_ms
         task.yolos_speed = speed
         task.yolos_detection_count = detection_count
@@ -656,6 +685,8 @@ preamble {=
         }
         if reactor.current_packet is not None:
             reactor.current_packet["yolos_input"] = input_label
+            reactor.current_packet["input_image"] = input_label
+            reactor.current_packet["image_path"] = input_label
             reactor.current_packet["yolos_inference_ms"] = inference_ms
             reactor.current_packet["yolos_speed"] = speed
             reactor.current_packet["yolos_detection_count"] = detection_count
@@ -979,6 +1010,7 @@ reactor Blackwell(device_index = 2, device_name = "Blackwell", dummy_task = Fals
             next_packet = dict(continuation)
             next_packet["parent_task"] = completed_task
             _attach_parent_yolos_output(next_packet, completed_task)
+            _attach_transfer_image(self, next_packet, completed_task=completed_task)
             if _is_llm_task(completed_task):
                 next_packet["parent_llm_answer"] = getattr(completed_task, "llm_answer", None)
             destination_device = next_packet.get("device")
@@ -1042,6 +1074,7 @@ reactor Blackwell(device_index = 2, device_name = "Blackwell", dummy_task = Fals
                     task = packet["task"]
                     destination_device = packet["device"]
                     packet["payload_size"] = task.input_size
+                    _attach_transfer_image(self, packet)
                     print(f"{self.device_name}: Forwarding input data for task {task.name} "
                           f"to device {destination_device}")
                 self.pending_packets.append(packet)
