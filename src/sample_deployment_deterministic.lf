@@ -1,0 +1,1461 @@
+target Python {
+    coordination: decentralized
+}
+
+import Jetson from "../lib/deployment/JetsonDet.lf"
+import A6000 from "../lib/deployment/A6000Det.lf"
+import Blackwell from "../lib/deployment/BlackwellDet.lf"
+
+preamble {=
+    import sys
+    import csv as csv_module
+    import random
+    import math
+    import logging
+    import os
+    from dataclasses import dataclass, field
+    from pathlib import Path
+    from typing import Deque, List, Dict, Tuple, Union, Set
+    import pandas as pd
+    from collections import deque
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as mticker
+    from matplotlib.lines import Line2D
+
+    logger = logging.getLogger(__name__)
+
+    SAMPLE_DEPLOYMENT_DATA_DIR = Path("data") / "sample_deployment"
+
+    def _find_project_root():
+        current_file = Path(__file__).resolve()
+        for candidate in (current_file.parent, *current_file.parents):
+            if (candidate / SAMPLE_DEPLOYMENT_DATA_DIR / "Bandwidth.csv").exists():
+                return candidate
+        return current_file.parents[2]
+
+    PROJECT_ROOT = _find_project_root()
+    SAMPLE_DEPLOYMENT_ROOT = PROJECT_ROOT / SAMPLE_DEPLOYMENT_DATA_DIR
+
+    def project_path(*parts):
+        return str(PROJECT_ROOT.joinpath(*parts))
+
+    def sample_deployment_path(*parts):
+        return str(SAMPLE_DEPLOYMENT_ROOT.joinpath(*parts))
+
+    def transfer_time_ms(data_size_mb: float, bandwidth_mb_per_sec: int) -> int:
+        """Transfer duration used by scheduler model (same convention as inference-offloading-scheduler)."""
+        if data_size_mb == 0 or bandwidth_mb_per_sec == 0:
+            return 0
+        return int(math.ceil(float(data_size_mb) / float(bandwidth_mb_per_sec)))
+
+    def channel_delay_ms(system, source_device_index: int, target_device_index: int, data_size_mb: float):
+        if source_device_index == target_device_index:
+            return 0
+
+        bandwidth = system.bandwidth[source_device_index][target_device_index]
+        if bandwidth == 0:
+            return None
+
+        return transfer_time_ms(data_size_mb, bandwidth)
+
+    # Shared deployment-network model. All p2p communications reserve this
+    # single channel, so no two packet transfers overlap in logical time.
+    network_available_sec = 0.0
+
+    def reset_network_serialization():
+        global network_available_sec
+        network_available_sec = 0.0
+
+    @dataclass
+    class Task:
+        name: str = ""
+        index: int = 0
+        deadline: int = -1
+        execution_times: List[int] = field(default_factory=list)  # ms per device type (Jetson, A6000, Blackwell)
+        child_task_indexes: List[int] = field(default_factory=list, repr=False)
+        parent_task_indexes: List[int] = field(default_factory=list, repr=False)  # Reverse relationship
+
+        input_size: int = 0
+        output_size: int = 0
+        
+        # TODO: Implement the source and destination devices. We may need to add a dummy node to represent the communication cost for staring and finishing the job.
+        source_device_index: int = 0
+        # destination_device_index: int = 0
+
+        # Information needed for scheduling
+        priority: float = 0
+        ready_time: int = -1
+        current_device: str = ""
+        communication_start_time: int = 0
+        communication_end_time: int = 0
+        computation_start_time: int = 0
+        computation_end_time: int = 0
+    
+    @dataclass
+    class Device:
+        # GFLOPS: int = 0 # Eventually, we may want to compute the execution time based on the number of operations, etc.
+        name: str = ""
+        index: int = 0
+        # current_job: Job | None = None
+        task_queue: Deque[Task] = field(default_factory=deque)
+        # Communication channel available time is computed from the last job in task_queue
+        # Job timing information is stored in the jobs themselves in task_queue
+        # Half-duplex communication channel: when this device's communication channel becomes available
+        # A device can either send OR receive, but not both simultaneously
+        comm_channel_available: int = 0
+        comm_queue: list[Tuple[str, int, int]] = field(default_factory=list)
+
+    @dataclass
+    class System:
+        task_csv_path: str
+        dependency_csv_path: str
+        bandwidth_csv_path: str = ""
+        network_info: dict = None
+        period: int = -1  # Will be computed from largest deadline if not provided
+        num_devices: int = 3
+        tasks: list[Task] = field(default_factory=list) # Nodes
+        edges: List[List[int]] = field(init=False) # Edges
+        devices: list[Device] = field(init=False)
+        bandwidth: list[list[int]] = field(init=False)
+        latency: list[list[int]] = field(init=False)
+
+        def __post_init__(self):
+            self.devices = [Device() for _ in range(self.num_devices)]
+            self.bandwidth = [[0] * self.num_devices for _ in range(self.num_devices)]
+            self.latency = [[0] * self.num_devices for _ in range(self.num_devices)]
+
+            if self.network_info is not None:
+                csv_device_names = [str(name).strip() for name in self.network_info.get("device_names", [])]
+                bandwidth_values = self.network_info.get("bandwidth", [])
+                latency_values = self.network_info.get("latency", [])
+
+                if len(csv_device_names) != self.num_devices:
+                    sys.exit(f"Error: network_info has {len(csv_device_names)} devices, but num_devices={self.num_devices}")
+                if len(bandwidth_values) != self.num_devices or any(len(row) != self.num_devices for row in bandwidth_values):
+                    sys.exit("Error: network_info bandwidth matrix has invalid dimensions")
+                if len(latency_values) != self.num_devices or any(len(row) != self.num_devices for row in latency_values):
+                    sys.exit("Error: network_info latency matrix has invalid dimensions")
+            else:
+                # Fallback for standalone simulation runs when no environment update is provided.
+                comm_df = pd.read_csv(self.bandwidth_csv_path, index_col=0)
+                comm_df.columns = comm_df.columns.str.strip()
+                comm_df.index = comm_df.index.str.strip()
+                
+                csv_device_names = list(comm_df.columns)
+                csv_index_names = list(comm_df.index)
+                
+                if len(csv_device_names) != self.num_devices:
+                    sys.exit(f"Error: Bandwidth CSV has {len(csv_device_names)} devices, but num_devices={self.num_devices}")
+                if len(csv_index_names) != self.num_devices:
+                    sys.exit(f"Error: Bandwidth CSV index has {len(csv_index_names)} devices, but num_devices={self.num_devices}")
+                
+                if csv_device_names != csv_index_names:
+                    sys.exit(f"Error: Bandwidth CSV column names and index names do not match. Columns: {csv_device_names}, Index: {csv_index_names}")
+                
+                bandwidth_values = comm_df.values
+                latency_values = [[0] * self.num_devices for _ in range(self.num_devices)]
+
+            for i, device in enumerate(self.devices):
+                device.name = csv_device_names[i]
+                device.index = i
+            
+            for i, device in enumerate(self.devices):
+                for j, target_device in enumerate(self.devices):
+                    bandwidth_value = bandwidth_values[i][j]
+                    latency_value = latency_values[i][j]
+                    if pd.isna(bandwidth_value) or (isinstance(bandwidth_value, float) and (bandwidth_value != bandwidth_value)):
+                        sys.exit("Error: No NA is expected in bandwidth.")
+                    if pd.isna(latency_value) or (isinstance(latency_value, float) and (latency_value != latency_value)):
+                        sys.exit("Error: No NA is expected in latency.")
+                    self.bandwidth[i][j] = int(bandwidth_value)
+                    self.latency[i][j] = int(latency_value)
+
+            # Initialize tasks
+            df = pd.read_csv(self.task_csv_path)
+
+            index = 0
+            # Initialize Task list
+            for _, row in df.iterrows():
+                name = str(row.iloc[0]).strip()
+                if not name or name.lower() == "nan":
+                    continue
+                deadline_ms = int(float(row.iloc[1]))
+                et_a_ms = int(float(row.iloc[2]))
+                et_b_ms = int(float(row.iloc[3]))
+                et_c_ms = int(float(row.iloc[4]))
+                # Internal device index order: 0 Jetson, 1 A6000, 2 Blackwell
+                execution_times_ms = [et_a_ms, et_b_ms, et_c_ms]
+                task = Task(
+                    name=name,
+                    index=index,
+                    deadline=deadline_ms,
+                    execution_times=execution_times_ms,
+                    input_size=int(row.iloc[5]),
+                    output_size=int(row.iloc[6]),
+                    source_device_index=0  # Will be set later for source tasks
+                    # destination_device_index=int(row.iloc[8])
+                )
+                self.tasks.append(task)
+                index += 1
+
+            # Initialize edges matrix
+            num_tasks = len(self.tasks)
+            self.edges = [[0 for _ in range(num_tasks)] for _ in range(num_tasks)]
+            
+            # Load probabilities from CSV using index-based access
+            # Read CSV without using first column as index, skip header row
+            prob_df = pd.read_csv(self.dependency_csv_path, header=0, index_col=None)
+            
+            # Populate edges matrix using integer indices
+            # Skip first column (row names) and first row (header), access data by position
+            for i in range(num_tasks):
+                # Row i+1 in CSV (skip header row), column j+1 (skip first column with row names)
+                for j in range(num_tasks):
+                    dependency = prob_df.iloc[i, j + 1]  # j+1 to skip first column
+                            
+                    if int(dependency) != 0 and int(dependency) != 1:
+                        sys.exit("Error: Dependency must be 0 or 1.")
+                            
+                    self.edges[i][j] = int(dependency)
+            
+            # Compute parent_task_indexes and child_task_indexes from edges matrix
+            for i in range(num_tasks):
+                for j in range(num_tasks):
+                    if self.edges[i][j] == 1:
+                        # Task i is a parent of task j
+                        if i not in self.tasks[j].parent_task_indexes:
+                            self.tasks[j].parent_task_indexes.append(i)
+                        if j not in self.tasks[i].child_task_indexes:
+                            self.tasks[i].child_task_indexes.append(j)
+            
+            # Randomly assign source tasks (tasks with no parents) to Jetson devices
+            jetson_device_indices = [i for i, device in enumerate(self.devices) if device.name == "Jetson"]
+            
+            if len(jetson_device_indices) == 0:
+                sys.exit("Error: No Jetson device found in system")
+            
+            # Find all source tasks (tasks with no parents)
+            source_tasks = [task for task in self.tasks if len(task.parent_task_indexes) == 0]
+            
+            # Randomly assign each source task to a Jetson device
+            for task in source_tasks:
+                selected_index = random.choice(jetson_device_indices)
+                task.source_device_index = selected_index
+                logger.debug(f"Assigned source task {task.name} to device {selected_index} ({self.devices[selected_index].name})")
+            
+            # Set period to the largest deadline from tasks
+            # This ensures period is always set to the maximum deadline
+            if len(self.tasks) > 0:
+                max_deadline = max((task.deadline for task in self.tasks if task.deadline > 0), default=-1)
+                if max_deadline > 0:
+                    self.period = max_deadline
+                elif self.period == -1:
+                    # If no valid deadlines found and period wasn't set, keep it as -1
+                    sys.exit("No deadline is found")
+    
+    def compute_finish_time(task: Task, device: Device, system: System, current_time: int) -> int:
+        """Compute when a task would finish if scheduled on the given device.
+        
+        Returns the computation_end_time considering:
+        - Communication timing (from parent or from device[0])
+        - Last task's completion time on the device
+        - Half-duplex communication model (both source and target channels must be available)
+        
+        Args:
+            task: The task to schedule
+            device: The target device to schedule on
+            system: The system containing all devices and tasks
+            current_time: Current simulation time
+            
+        Returns:
+            The computation_end_time if scheduled on this device, or sys.maxsize if invalid
+        """
+        logger.debug(f"Compute finish time of task {task.name} on device {device.index}")
+        
+        # 1. Compute communication timing
+        comm_end_time = current_time
+        
+        if len(task.parent_task_indexes) > 0:
+            # Task has parent: communication from parent device
+            # For single parent case (simplified for debugging)
+            parent_task_index = task.parent_task_indexes[0]
+            parent_task = system.tasks[parent_task_index]
+            parent_device = parent_task.current_device
+            
+            if parent_device is None:
+                # Parent hasn't been scheduled yet, can't compute finish time accurately
+                return sys.maxsize
+            
+            logger.debug(f"parent device = Device{parent_device.index}")
+            
+            if parent_device == device:
+                # Same device, no communication needed
+                comm_end_time = current_time
+            else:
+                # Half-duplex model: Check both source and target device's communication channel availability
+                # Each device has one channel that handles one activity at a time
+                source_comm_available = max(
+                    parent_device.comm_channel_available,
+                    parent_task.computation_end_time
+                )
+                target_comm_available = device.comm_channel_available
+                
+                logger.debug(f"device {device.index}'s comm_available = {target_comm_available}")
+                logger.debug(f"parent device {parent_device.index}'s comm_available = {parent_device.comm_channel_available}")
+
+                # Parent completion time (should be set when parent task was dispatched)
+                parent_completion_time = parent_task.computation_end_time
+                logger.debug(f"parent task's completion_time = {parent_completion_time}")
+                
+                # Transfer start time: both source and target channels must be available
+                transfer_start_time = max(source_comm_available, target_comm_available, parent_completion_time, current_time)
+                
+                # Calculate transfer time
+                data_size = parent_task.output_size
+                transfer_time = channel_delay_ms(system, parent_device.index, device.index, data_size)
+                if transfer_time is None:
+                    return sys.maxsize
+                
+                comm_end_time = transfer_start_time + transfer_time
+                logger.debug(f"comm_end_time = {comm_end_time}")
+        else:
+            # No parent: check if transfer needed from the task's source device.
+            source_device = system.devices[task.source_device_index]
+            
+            if source_device == device:
+                # Same device, no communication needed
+                comm_end_time = current_time
+            else:
+                # Half-duplex model: Check both source and target device's communication channel availability
+                source_comm_available = source_device.comm_channel_available
+                target_comm_available = device.comm_channel_available
+                
+                # Transfer start time: both source and target channels must be available
+                transfer_start_time = max(source_comm_available, target_comm_available, current_time)
+                
+                # Calculate transfer time
+                data_size = task.input_size
+                transfer_time = channel_delay_ms(system, source_device.index, device.index, data_size)
+                if transfer_time is None:
+                    return sys.maxsize
+                
+                comm_end_time = transfer_start_time + transfer_time
+        
+        # 2. Compute computation start time (max of last task completion and communication end)
+        if len(device.task_queue) > 0:
+            last_task = device.task_queue[0]
+            last_task_completion_time = last_task.computation_end_time
+        else:
+            last_task_completion_time = current_time
+        
+        computation_start_time = max(last_task_completion_time, comm_end_time)
+        logger.debug(f"computation_start_time = max({last_task_completion_time}, {comm_end_time}) = {computation_start_time}")
+        
+        # 3. Compute finish time
+        # Map device name to execution time index (0=Jetson, 1=A6000, 2=Blackwell)
+        device_name_to_index = {"Jetson": 0, "A6000": 1, "Blackwell": 2}
+        device_type_index = device_name_to_index.get(device.name)
+        if device_type_index is None:
+            logger.error(f"Unknown device name: {device.name}")
+            return sys.maxsize
+        execution_time = task.execution_times[device_type_index]
+        finish_time = computation_start_time + execution_time
+        logger.debug(f"finish_time = {finish_time}\n")
+        
+        return finish_time
+
+    def compute_communication_cost(parent_task: Task, child_task: Task, system: System) -> float:
+        """Compute the average communication cost from parent to child task across all device pairs."""
+        logger.debug(f"compute_communication_cost: parent = {parent_task.name}, child = {child_task.name}")
+        data_length = child_task.input_size
+        
+        # Compute average communication time across all device pairs
+        total_cost = 0
+        for i in range(system.num_devices):
+            for j in range(system.num_devices):
+                cost = channel_delay_ms(system, i, j, data_length)
+                if cost is not None:
+                    total_cost += cost
+                
+        logger.debug(f"Total cost = {total_cost}, num_device = {system.num_devices}")
+        
+        return total_cost / (system.num_devices * system.num_devices)
+
+    def compute_upward_rank(task: Task, system: System, rank_cache: dict) -> float:
+        """Compute upward rank for a task recursively."""
+        # Check cache first - use task index as key for consistency
+        task_index = task.index
+        if task_index in rank_cache:
+            return rank_cache[task_index]
+        
+        # w_i: average computation cost across all devices
+        w_i = sum(task.execution_times) / len(task.execution_times) if task.execution_times else 0
+        
+        # For leaf nodes (no children), rank is just w_i
+        if len(task.child_task_indexes) == 0:
+            rank_cache[task_index] = w_i
+            return w_i
+        
+        # For tasks with children, compute max over children
+        max_child_rank = 0
+        
+        for child_index in task.child_task_indexes:
+            child_task = system.tasks[child_index]
+            # Compute rank for child (recursive)
+            child_rank = compute_upward_rank(child_task, system, rank_cache)
+            # Compute communication cost from this task to child
+            comm_cost = compute_communication_cost(task, child_task, system)
+            # c_{i,j} + rank_u(n_j)
+            total = comm_cost + child_rank
+            max_child_rank = max(max_child_rank, total)
+        
+        rank_u = w_i + max_child_rank
+        rank_cache[task_index] = rank_u
+        return rank_u
+
+    # compute_finish_time is now imported from scheduler_utils
+
+    def heft_scheduler(system: System, event_q: Deque[Task], current_time: int = 0):
+        """HEFT (Heterogeneous Earliest Finish Time) scheduler.
+        
+        For each task (sorted by priority), finds the device that can finish it earliest.
+        """
+        logger.debug(f"At time {current_time}, scheduling tasks")
+
+        # Filter tasks to only include those that are ready (ready_time != -1 and ready_time <= current_time)
+        ready_tasks = [task for task in event_q if task.ready_time != -1 and task.ready_time <= current_time]
+        
+        logger.debug(f"At time {current_time}, {len(ready_tasks)} ready task(s) out of {len(event_q)} total task(s)")
+
+        # Compute ranks for all ready tasks
+        rank_cache = {}  # Cache to avoid recomputing ranks for the same task
+        
+        for task in ready_tasks:
+            # Compute upward rank for this task
+            rank_u = compute_upward_rank(task, system, rank_cache)
+            # Store rank in task's priority field
+            task.priority = rank_u
+            logger.debug(f"At time {current_time}, {task.name}'s priority is {rank_u}")
+
+        mappings = []
+        
+        # If there are no ready tasks, nothing to schedule
+        if len(ready_tasks) == 0:
+            return mappings
+        
+        # Sort tasks by highest priority (upward rank), then by earliest deadline as tiebreaker
+        sorted_tasks = sorted(ready_tasks, key=lambda t: (-t.priority, t.deadline if t.deadline else sys.maxsize))
+        
+        # Track which device indices have been assigned tasks in this scheduling round
+        assigned_device_indices = set()
+        
+        # For each task in priority order, find the device that can finish it earliest
+        for task in sorted_tasks:
+            best_device = None
+            best_finish_time = sys.maxsize
+            
+            # Check all devices to find the one with earliest finish time
+            for device in system.devices:
+                # Skip if device already assigned in this round
+                if device.index in assigned_device_indices:
+                    continue
+                
+                finish_time = compute_finish_time(task, device, system, current_time)
+                
+                if finish_time < best_finish_time:
+                    best_finish_time = finish_time
+                    best_device = device
+            
+            # If we found a device, assign the task to it
+            if best_device is not None:
+                mappings.append([task, best_device])
+                assigned_device_indices.add(best_device.index)
+                logger.debug(f"Assigned {task.name} to {best_device.name}, finish time: {best_finish_time}")
+                
+                # Remove the task from the global queue
+                try:
+                    event_q.remove(task)
+                except ValueError:
+                    logger.debug(f"Task {task} not found in event_q when scheduling; it was likely removed earlier.")
+            else:
+                logger.debug(f"No available device found for {task.name}")
+
+        return mappings
+
+    def compute_level(task: Task, system: System) -> int:
+        """Compute Hu level: longest path length from this task to any leaf."""
+        if len(task.child_task_indexes) == 0:
+            return 0
+
+        max_child_level = 0
+        for child_index in task.child_task_indexes:
+            child_task = system.tasks[child_index]
+            child_level = compute_level(child_task, system)
+            max_child_level = max(max_child_level, child_level)
+
+        return 1 + max_child_level
+
+    def hu_scheduler(system: System, event_q: Deque[Task], current_time: int = 0):
+        """Hu level scheduler.
+
+        Priority is Hu level (higher first), then earliest deadline.
+        Device assignment picks earliest finish time.
+        """
+        logger.debug(f"At time {current_time}, scheduling tasks with HU")
+
+        ready_tasks = [task for task in event_q if task.ready_time != -1 and task.ready_time <= current_time]
+        logger.debug(f"At time {current_time}, {len(ready_tasks)} ready task(s) out of {len(event_q)} total task(s)")
+
+        for task in ready_tasks:
+            level = compute_level(task, system)
+            task.priority = level
+            logger.debug(f"At time {current_time}, {task.name}'s priority (level) is {task.priority}")
+
+        mappings = []
+        if len(ready_tasks) == 0:
+            return mappings
+
+        sorted_tasks = sorted(ready_tasks, key=lambda t: (-t.priority, t.deadline if t.deadline else sys.maxsize))
+        assigned_device_indices = set()
+
+        for task in sorted_tasks:
+            best_device = None
+            best_finish_time = sys.maxsize
+
+            for device in system.devices:
+                if device.index in assigned_device_indices:
+                    continue
+
+                finish_time = compute_finish_time(task, device, system, current_time)
+                if finish_time < best_finish_time:
+                    best_finish_time = finish_time
+                    best_device = device
+
+            if best_device is not None:
+                mappings.append([task, best_device])
+                assigned_device_indices.add(best_device.index)
+                logger.debug(f"Assigned {task.name} to {best_device.name}, finish time: {best_finish_time}")
+
+                try:
+                    event_q.remove(task)
+                except ValueError:
+                    logger.debug(f"Task {task} not found in event_q when scheduling; it was likely removed earlier.")
+            else:
+                logger.debug(f"No available device found for {task.name}")
+
+        return mappings
+
+    ########### Global variables ###########
+    current_time = -1
+    global_deadline = -1
+    event_q: Deque[Task] = deque()
+    # Track job assignments for final summary
+    job_assignments: List[Dict] = []
+    # Scheduler selection in file (no CLI argument required).
+    # Allowed values: "HEFT", "HU"
+    scheduler_mode = "HEFT"
+
+    # Scheduler function pointer
+    scheduler = hu_scheduler if scheduler_mode == "HU" else heft_scheduler
+    # Track completed parents for each child task
+    # Key: child_task_index, Value: set of completed parent_task_indexes
+    completed_parents: Dict[int, Set[int]] = {}
+
+    ########### Functions ###########
+
+    def reset_simulation_state(system: System):
+        """Reset global state for running simulation multiple times (for SPSA)."""
+        global current_time, event_q, job_assignments, completed_parents
+        
+        logger.debug(f"reset_simulation_state() called: system.tasks has {len(system.tasks)} tasks")
+        logger.debug(f"Before reset: event_q has {len(event_q)} tasks")
+        
+        current_time = -1
+        event_q.clear()
+        job_assignments.clear()
+        completed_parents.clear()
+        
+        # Reset task states
+        for task in system.tasks:
+            task.ready_time = -1
+            task.current_device = None
+            task.communication_start_time = 0
+            task.communication_end_time = 0
+            task.computation_start_time = 0
+            task.computation_end_time = 0
+            task.priority = 0
+        
+        # Reset device queues and communication channels
+        for device in system.devices:
+            device.task_queue.clear()
+            device.comm_channel_available = 0
+            device.comm_queue.clear()
+        
+        logger.debug(f"After reset: event_q has {len(event_q)} tasks (should be 0)")
+
+    # Enqueue all tasks
+    def init(system: System):
+        logger.debug(f"init() called: system.tasks has {len(system.tasks)} tasks")
+        if len(system.tasks) == 0:
+            logger.error("ERROR: system.tasks is empty! Cannot initialize simulation.")
+            return
+        
+        for task in system.tasks:
+            if len(task.parent_task_indexes) == 0:
+                task.ready_time = 0
+            if task.deadline == -1:
+                task.deadline = global_deadline
+            event_q.append(task)
+            logger.debug(f"Enqueue {task.name}")
+        
+        logger.debug(f"init() completed: event_q now has {len(event_q)} tasks")
+
+    # Enqueue new jobs
+    def enqueue(system: System, completed_tasks: list[Task]):
+        """Handle child tasks when a parent task completes.
+        
+        For AND-node semantics: a child task becomes ready only when ALL its parents have completed.
+        
+        Args:
+            system: System configuration
+            completed_tasks: List of tasks that just completed
+        """
+        global completed_parents
+        
+        for task in completed_tasks:
+            if task is None:
+                sys.exit("Error: completed task is None")
+            
+            # Mark this parent as completed for all its children
+            completed_parent_index = task.index
+            
+            for child_index in task.child_task_indexes:
+                child_task = system.tasks[child_index]
+                
+                # Initialize completed_parents set for this child if not exists
+                if child_index not in completed_parents:
+                    completed_parents[child_index] = set()
+                
+                # Mark this parent as completed
+                completed_parents[child_index].add(completed_parent_index)
+                logger.debug(f"Parent {task.name} (index {completed_parent_index}) completed for child {child_task.name} (index {child_index})")
+                
+                # Check if all parents have completed (AND-node semantics)
+                all_parents_completed = len(completed_parents[child_index]) == len(child_task.parent_task_indexes)
+                
+                if all_parents_completed:
+                    # All parents have completed, child is now ready
+                    child_task.ready_time = current_time
+                    logger.debug(f"Child task {child_task.name} is ready at time {current_time} (all {len(child_task.parent_task_indexes)} parent(s) completed)")
+                else:
+                    # Still waiting for more parents
+                    remaining = len(child_task.parent_task_indexes) - len(completed_parents[child_index])
+                    logger.debug(f"Child task {child_task.name} waiting for {remaining} more parent(s) to complete")
+                    
+
+    # Look up devices and find the earliest time at which a job is ended
+    # If no device is running any jobs, find the earlist job-release time
+    # FIXME: Compute the utilization.
+    def next(system:System):
+        logger.debug(f"Call next() at time {current_time}")
+        if current_time == -1:
+            return False, 0, []
+        # Determine the earliest time at which any running job will complete.
+        time_to_step = sys.maxsize
+        freed_devices: list[Device] = []
+
+        for device in system.devices:
+            # Peek at tasks in queue (FIFO: first task is the currently running one)
+            # Find the task that is currently running (has started and not completed)
+            # Also consider tasks that are queued but haven't started yet
+            if len(device.task_queue) > 0:
+                # Check tasks in order until we find one that has started
+                current_task = None
+                next_task_to_start = None
+                for task in device.task_queue:
+                    if task.computation_start_time <= current_time:
+                        # This task has started, check if it's still running
+                        if task.computation_end_time > current_time:
+                            # Task is currently running
+                            current_task = task
+                            break
+                        # Task has completed, continue to next task in queue
+                    else:
+                        # Task hasn't started yet - this is the next task that will start
+                        if next_task_to_start is None:
+                            next_task_to_start = task
+                        # In FIFO order, stop looking after first unstarted task
+                        break
+                
+                if current_task is not None:
+                    logger.debug(f"Device {device.index}'s current task: {current_task.name}, start at {current_task.computation_start_time}, will end at {current_task.computation_end_time}")
+                    time_to_step_cand = current_task.computation_end_time
+                    if time_to_step_cand < time_to_step:
+                        time_to_step = time_to_step_cand
+                        freed_devices = [device]
+                    elif time_to_step_cand == time_to_step:
+                        freed_devices.append(device)
+                elif next_task_to_start is not None:
+                    # No task is currently running, but there's a task queued that will start
+                    # Consider its start time as a potential time_to_step
+                    logger.debug(f"Device {device.index} has queued task {next_task_to_start.name} that will start at {next_task_to_start.computation_start_time}")
+                    start_time_cand = next_task_to_start.computation_start_time
+                    if start_time_cand < time_to_step:
+                        time_to_step = start_time_cand
+                        freed_devices = []  # No devices freed, just advancing time
+                    elif start_time_cand == time_to_step:
+                        # Multiple tasks starting at same time
+                        pass
+
+        if time_to_step == sys.maxsize:
+            logger.debug("No device is running any task.")
+            if len(event_q) == 0:
+                logger.info("Event queue is empty and no device is running a job, end simulation")
+                return True, current_time, []
+            
+            # Compute the earliest job release time
+            earliest_ready_time = sys.maxsize
+            ready_tasks_found = False
+            for task in event_q:
+                if task.ready_time == -1:
+                    # Task is waiting for parents - skip it
+                    continue
+                ready_tasks_found = True
+                if task.ready_time < current_time:
+                    sys.exit("Error: task ready time must be later than the current time")
+                if task.ready_time < earliest_ready_time:
+                    earliest_ready_time = task.ready_time
+            
+            if not ready_tasks_found:
+                # No tasks are ready and no devices are running
+                # This means all tasks that can be scheduled have been scheduled
+                # Remaining tasks in queue are waiting for parents that may never complete
+                # or there's a deadlock - end simulation
+                sys.exit("No devices running and but there are some tasks in event queue")
+            
+            logger.debug(f"earliest_ready_time = {earliest_ready_time}")
+            time_to_step = earliest_ready_time
+            freed_devices = []
+            
+        # Validate computed next time
+        if time_to_step == sys.maxsize:
+            sys.exit("Error: could not determine next time to advance to")
+        if time_to_step <= current_time:
+            sys.exit(f"Error: trying to advance to the past or the current time, current time = {current_time}, time_to_step = {time_to_step}")
+
+        logger.debug(f"current time = {current_time}, time_to_step = {time_to_step}")
+        logger.debug(f"\nAdvance the current time {current_time} to {time_to_step}")
+        logger.debug(f"\nDevices to be freed: {[device.index for device in freed_devices]}")
+
+        return False, time_to_step, freed_devices
+
+    def dispatch_jobs(system: System, mappings: List[List[Union[Task, Device]]]):
+        # Dispatch jobs
+        for mapping in mappings:
+            device = mapping[1]
+            if type(device) is not Device:
+                sys.exit("Error: this must be a device")
+            task = mapping[0]
+            if type(task) is not Task:
+                sys.exit("Error: this must be a job")
+
+            logger.debug(f"\nAt time {current_time}, dispatch job {task.index} to {device.index}")
+
+            # Handle communication from parent tasks
+            # Half-duplex model: Each device has one communication channel that handles one activity at a time
+            # A device can either send OR receive, but not both simultaneously
+            # A device can only send to one device at a time
+            # A device can only receive from one device at a time
+            if len(task.parent_task_indexes) > 0:
+                # Get all parent tasks
+                parent_tasks = [system.tasks[parent_index] for parent_index in task.parent_task_indexes]
+                
+                # Verify all parents have been scheduled and completed
+                for parent_task in parent_tasks:
+                    if parent_task.current_device is None:
+                        sys.exit(f"Error: Parent task {parent_task.name} has no current device")
+                    if parent_task.computation_end_time == 0:
+                        sys.exit(f"Error: Parent task {parent_task.name} computation_end_time not set")
+                
+                # Process transfers from each parent sequentially
+                # Track communication window for this child task
+                child_comm_start_time = current_time
+                child_comm_end_time = current_time
+                
+                for parent_task in parent_tasks:
+                    parent_device = parent_task.current_device
+                    parent_completion_time = parent_task.computation_end_time
+                    
+                    # If parent and child are on same device, no transfer needed for this parent
+                    if parent_device == device:
+                        logger.debug(f"Parent {parent_task.name} and child {task.name} on same device {device.index}, no transfer needed")
+                        continue
+                    
+                    if parent_device == None:
+                        sys.exit("Parent device is None.")
+
+                    # Get communication channel availability for both source and target devices
+                    # Each device has one channel that handles one activity at a time
+                    source_comm_available = max(
+                        parent_device.comm_channel_available,
+                        parent_completion_time
+                    )
+                    
+                    target_comm_available = device.comm_channel_available
+                    
+                    # Transfer can start when:
+                    # 1. Source device's communication channel is available (for sending)
+                    # 2. Target device's communication channel is available (for receiving)
+                    # 3. Parent device has completed and can send
+                    # 4. Current time (job is being scheduled now)
+                    transfer_start_time = max(
+                        source_comm_available,  # Source device can send
+                        target_comm_available,  # Target device can receive
+                        parent_completion_time,  # Parent must complete first
+                        current_time  # Cannot start in the past
+                    )
+                    
+                    # Calculate transfer time using parent's output_size
+                    # Note: Each parent sends its own output data
+                    data_size = parent_task.output_size
+                    transfer_time = channel_delay_ms(system, parent_device.index, device.index, data_size)
+                    if transfer_time is None:
+                        sys.exit(f"Error: Bandwidth between {parent_device.name} and {device.name} is 0")
+                    
+                    transfer_end_time = transfer_start_time + transfer_time
+                    
+                    # Update communication channel availability for both devices
+                    # Both devices are busy during the transfer (source sending, target receiving)
+                    parent_device.comm_channel_available = transfer_end_time
+                    device.comm_channel_available = transfer_end_time
+                    
+                    # Record communication in both devices' comm_queue
+                    # Both devices have the same entry since they participate in the same communication
+                    comm_entry = (task.name, transfer_start_time, transfer_end_time)
+                    parent_device.comm_queue.append(comm_entry)
+                    device.comm_queue.append(comm_entry)
+                    
+                    # Track the overall communication window for this child task
+                    if transfer_start_time < child_comm_start_time or child_comm_start_time == current_time:
+                        child_comm_start_time = transfer_start_time
+                    if transfer_end_time > child_comm_end_time:
+                        child_comm_end_time = transfer_end_time
+                    
+                    logger.debug(f"Transfer from parent {parent_task.name} (device {parent_device.index}) to child {task.name} "
+                            f"(device {device.index}): start={transfer_start_time}, end={transfer_end_time}, "
+                            f"data_size={data_size}")
+                
+                # Child task's communication ends when all parent transfers complete
+                # If all parents are on the same device as child, no transfers needed
+                if child_comm_end_time == current_time:
+                    # No transfers needed (all parents on same device)
+                    task.communication_start_time = current_time
+                    task.communication_end_time = current_time
+                else:
+                    # Communication window spans from first transfer start to last transfer end
+                    task.communication_start_time = child_comm_start_time
+                    task.communication_end_time = child_comm_end_time
+                    logger.debug(f"Child {task.name} communication: start={task.communication_start_time}, end={task.communication_end_time}")
+            else:
+                # No parent jobs: check if job needs to be transferred from device[0] (release device)
+                source_device = system.devices[task.source_device_index]
+                
+                if source_device == device:
+                    # Job is being mapped to the same device where it was released, no transfer needed
+                    task.communication_start_time = current_time
+                    task.communication_end_time = current_time
+                else:
+                    # Job needs to be transferred from device[0] to target device
+                    # Get communication channel availability for both source and target devices
+                    source_comm_available = source_device.comm_channel_available
+                    target_comm_available = device.comm_channel_available
+                    
+                    # Transfer can start when both channels are available
+                    # (Data is already available at device[0] since job was released there)
+                    transfer_start_time = max(source_comm_available, target_comm_available, current_time)
+                    
+                    # Calculate transfer time using task's input_size
+                    data_size = task.input_size
+                    transfer_time = channel_delay_ms(system, source_device.index, device.index, data_size)
+                    if transfer_time is None:
+                        sys.exit(f"Error: Bandwidth between {source_device.name} and {device.name} is 0")
+                    
+                    transfer_end_time = transfer_start_time + transfer_time
+                    
+                    # Update communication channel availability for both devices
+                    # Both devices are busy during the transfer (source sending, target receiving)
+                    source_device.comm_channel_available = transfer_end_time
+                    device.comm_channel_available = transfer_end_time
+                    
+                    # Record communication in both devices' comm_queue
+                    # Both devices have the same entry since they participate in the same communication
+                    comm_entry = (task.name, transfer_start_time, transfer_end_time)
+                    source_device.comm_queue.append(comm_entry)
+                    device.comm_queue.append(comm_entry)
+                    
+                    # Communication timing
+                    task.communication_start_time = transfer_start_time
+                    task.communication_end_time = transfer_end_time
+            
+            # Set computation start time: max of last job completion and communication end time
+            # Device can only run one computation at a time
+            # FIFO queue: task_queue[0] is currently running, task_queue[-1] is last queued
+            # For a new task, it should start after the last task in queue completes
+            # First, clean up any completed tasks from the queue (they should have been popped, but be safe)
+            while len(device.task_queue) > 0 and device.task_queue[0].computation_end_time <= current_time:
+                # Remove completed tasks from front of queue (shouldn't happen, but clean up)
+                old_task = device.task_queue.popleft()
+                logger.debug(f"Cleaning up completed task {old_task.name} (ended at {old_task.computation_end_time}) from device {device.index} queue")
+            
+            if len(device.task_queue) > 0:
+                # Use the last task in queue (most recently queued) to determine when this new task can start
+                last_job = device.task_queue[-1]  # Last task in queue
+                last_job_completion_time = last_job.computation_end_time
+            else:
+                # Queue is empty, device is idle
+                last_job_completion_time = current_time
+            
+            task.computation_start_time = max(last_job_completion_time, task.communication_end_time)
+            # Map device name to execution time index (0=Jetson, 1=A6000, 2=Blackwell)
+            device_name_to_index = {"Jetson": 0, "A6000": 1, "Blackwell": 2}
+            device_type_index = device_name_to_index.get(device.name)
+            if device_type_index is None:
+                logger.error(f"Unknown device name: {device.name}")
+                sys.exit(f"Error: Unknown device name: {device.name}")
+            task.computation_end_time = task.computation_start_time + task.execution_times[device_type_index]
+            logger.debug(f"computation_start_time = {task.computation_start_time}, computation_end_time = {task.computation_end_time}")
+            
+            task.current_device = device
+            
+            # Add job to device's job queue (FIFO: append to end, will run after all previous tasks)
+            device.task_queue.append(task)
+            
+            # Track job assignment for final summary
+            device_index = system.devices.index(device)
+            completion_time = task.computation_end_time
+            # Only check deadline if it's a valid deadline (not None and not -1)
+            deadline_met = (completion_time <= task.deadline) if (task.deadline is not None and task.deadline > 0) else True
+
+            job_assignments.append({
+                "job": task,
+                "device": device,
+                "mapped_time": current_time,
+                "start_time": task.computation_start_time,  # Use job's computation start time
+                "completion_time": completion_time,
+                "deadline": task.deadline,
+                "deadline_met": deadline_met,
+                "task_name": task.name,
+                "ready_time": task.ready_time
+            })
+
+    def main_loop(system: System, reset_state: bool = True) -> List[Dict]:
+        """Run one simulation period.
+        
+        Args:
+            system: System configuration
+            reset_state: If True, reset state before running (default: True)
+        
+        Returns:
+            List of job assignments from this run
+        """
+        global current_time, scheduler, job_assignments
+        
+        if reset_state:
+            reset_simulation_state(system)
+            init(system)
+        
+        while True:
+            time_to_step = 0
+            freed_devices = []
+            completion, time_to_step, freed_devices = next(system)
+            if completion:
+                break
+
+            # Advance the current time to the earliest time at which any job is complete
+            # If no device is running any job, jump to the earliest job ready time
+            current_time = time_to_step
+
+            # Check deadline violations
+            for device in freed_devices:
+                if len(device.task_queue) == 0:
+                    sys.exit(f"This device {device.index} must have a job")
+                
+                # Peek at the first task (should be the one completing now in FIFO queue)
+                current_task = device.task_queue[0]  # Peek without removing
+                
+                if current_task.current_device == None or device != current_task.current_device:
+                    sys.exit(f"Invalid job and device pair; Job = {current_task.name}, Device = {device.index}")
+                
+                if current_task.computation_end_time != current_time:
+                    sys.exit(f"Device {device.index}'s job {current_task.name} must be completed at this time {current_time}, but it ends at {current_task.computation_end_time}")
+
+            # Collect the tasks that just completed before removing them from queues
+            completed_tasks = []
+            for device in freed_devices:
+                if len(device.task_queue) == 0:
+                    sys.exit(f"Error: Device {device.index} has no task in queue")
+                
+                # Find the task that just completed (ends at current_time)
+                completed_task = None
+                for task in device.task_queue:
+                    if task.computation_end_time == current_time:
+                        completed_task = task
+                        break
+                
+                if completed_task is None:
+                    sys.exit(f"Error: Device {device.index} has no task ending at {current_time}")
+                
+                completed_tasks.append(completed_task)
+            
+            # Schedule new jobs that are potentially invoked by the completed jobs
+            enqueue(system=system, completed_tasks=completed_tasks)
+
+            # Remove completed tasks from queue (FIFO: remove from front)
+            # The task that just completed should be at the front of the queue
+            for device in freed_devices:
+                if len(device.task_queue) == 0:
+                    sys.exit(f"Error: Device {device.index} has no task in queue to pop")
+                
+                # In FIFO queue, the first task should be the one that just completed
+                # But verify it actually ends at current_time to be safe
+                first_task = device.task_queue[0]
+                if first_task.computation_end_time == current_time:
+                    popped_job = device.task_queue.popleft()  # Remove first element (FIFO)
+                    logger.debug(f"\nPop Job {popped_job.name}, ready time = {popped_job.ready_time} from device {device.index}")
+                else:
+                    # The first task doesn't end at current_time - this shouldn't happen in proper FIFO
+                    # Find and remove the task that actually ends at current_time
+                    task_found = False
+                    for i, task in enumerate(device.task_queue):
+                        if task.computation_end_time == current_time:
+                            if i == 0:
+                                popped_job = device.task_queue.popleft()
+                            else:
+                                # Remove from position i (shouldn't happen in FIFO, but handle it)
+                                del device.task_queue[i]
+                                popped_job = task
+                            logger.debug(f"\nPop Job {popped_job.name} (was at position {i}), ready time = {popped_job.ready_time} from device {device.index}")
+                            task_found = True
+                            break
+                    
+                    if not task_found:
+                        sys.exit(f"Error: Device {device.index} has no task ending at {current_time}. First task ends at {first_task.computation_end_time}")
+
+            # Get the next mapping of jobs and devices
+            # mappings = edf_like_scheduler(system=system, event_q=event_q)
+            if scheduler == None:
+                sys.exit("Scheduler is not initialized.")
+            mappings = scheduler(system=system, event_q=event_q, current_time=current_time)
+
+            dispatch_jobs(system, mappings=mappings)
+        
+        # Return a copy of job_assignments for SPSA
+        return job_assignments.copy()
+=}
+
+reactor TaskSetSource {
+    output tasks
+
+    reaction(startup) -> tasks {=
+        task_csv_path = sample_deployment_path("Tasks.csv")
+        dependency_csv_path = sample_deployment_path("Dependencies.csv")
+
+        # Read the CSVs here so the scheduler receives a validated task-set descriptor.
+        pd.read_csv(task_csv_path)
+        pd.read_csv(dependency_csv_path, header=0, index_col=None)
+
+        tasks.set({
+            "task_csv_path": task_csv_path,
+            "dependency_csv_path": dependency_csv_path
+        })
+    =}
+}
+
+reactor Scheduler {
+    preamble {=
+    =}
+
+    input change
+    input tasks
+    input network_info
+
+    state dev_mobile = [0, [], [], []]  # Jetson device_index 0
+    state dev_edge = [1, [], [], []]    # A6000 device_index 1
+    state dev_cloud = [2, [], [], []]  # Blackwell device_index 2
+    state task_set = []
+    // state tasks = [[0, 6, [4, 3, 2], 4, 4], [1, 10, [8, 5, 4], 4, 1]] # [index, deadline, [exec_time on Jetson, A6000, Blackwell], input_size, output_size]
+    // state bandwidth = [[0, 2, 5], [2, 0, 3], [5, 3, 0]] # link rates (MB/s) between devices
+    output[3] task_chains
+
+    reaction(change, tasks, network_info) -> task_chains {=
+        if tasks.is_present:
+            self.task_set = tasks.value
+
+        if len(self.task_set) == 0 or not network_info.is_present:
+            return
+
+        task_csv_path = self.task_set["task_csv_path"]
+        dependency_csv_path = self.task_set["dependency_csv_path"]
+        network_info_value = network_info.value
+
+        system = System(task_csv_path=task_csv_path, 
+                    dependency_csv_path=dependency_csv_path, 
+                    network_info=network_info_value,
+                    num_devices=3)
+
+        global_deadline = system.period
+        reset_network_serialization()
+        job_assignments = main_loop(system, reset_state=True)
+        # print(job_assignments)
+        
+        # Create a mapping from task index to device index for quick lookup
+        task_to_device = {}
+        for assignment in job_assignments:
+            device_index = assignment["device"].index
+            task_index = assignment["job"].index
+            task_to_device[task_index] = device_index
+
+        def build_chain_packet(task_index, active_path=None):
+            if active_path is None:
+                active_path = set()
+            if task_index in active_path:
+                sys.exit(f"Error: cycle detected while building deployment chain at task {task_index}")
+
+            task = system.tasks[task_index]
+            next_path = set(active_path)
+            next_path.add(task_index)
+            continuations = []
+            for child_index in task.child_task_indexes:
+                if child_index in task_to_device:
+                    continuations.append(build_chain_packet(child_index, next_path))
+
+            return {
+                "task": task,
+                "device": task_to_device[task_index],
+                "source_device": task.source_device_index,
+                "continuations": continuations
+            }
+
+        initial_task_chains = [[] for _ in range(system.num_devices)]
+        for task in system.tasks:
+            if len(task.parent_task_indexes) == 0 and task.index in task_to_device:
+                packet = build_chain_packet(task.index)
+                initial_task_chains[packet["source_device"]].append(packet)
+
+        for device_index, chains in enumerate(initial_task_chains):
+            print(f"Initial deployment chains sourced at device {device_index}: "
+                  f"{[packet['task'].name for packet in chains]}")
+            task_chains[device_index].set(chains)
+    =}
+}
+
+reactor TaskDistributor {
+    // input change
+    // input network_info
+
+    output[3] task_chains
+    output network_info
+
+    e = new EnvironmentUpdateDetector()
+    t = new TaskSetSource()
+    s = new Scheduler()
+
+    
+    t.tasks -> s.tasks
+    e.change -> s.change
+    e.network_info -> s.network_info
+    e.network_info -> network_info
+    s.task_chains -> task_chains
+}
+
+reactor EnvironmentUpdateDetector {
+    // timer t(0, 10 sec)
+    output change
+    output network_info
+
+    reaction(startup) -> change, network_info {=
+        bandwidth_csv_path = sample_deployment_path("Bandwidth.csv")
+        comm_df = pd.read_csv(bandwidth_csv_path, index_col=0)
+        comm_df.columns = comm_df.columns.str.strip()
+        comm_df.index = comm_df.index.str.strip()
+
+        device_names = list(comm_df.columns)
+        bandwidth = []
+        for i in range(len(device_names)):
+            row = []
+            for j in range(len(device_names)):
+                v = comm_df.iloc[i, j]
+                row.append(int(v) if not pd.isna(v) else 0)
+            bandwidth.append(row)
+
+        latency = [[0] * len(device_names) for _ in range(len(device_names))]
+
+        network_info.set({
+            "device_names": device_names,
+            "bandwidth": bandwidth,
+            "latency": latency
+        })
+        change.set(True)
+    =}
+}
+
+reactor OutputVisualizer(bandwidth_csv_path = "data/sample_deployment/Bandwidth.csv") {
+    input r1_output
+    input r2_output
+    input r3_output
+    input r1_trace
+    input r2_trace
+    input r3_trace
+
+    state received_traces = []
+    state completed_task_indexes = []
+    state total_task_count = 0
+    state plotted = False
+    state bandwidth = []
+    state reactor_to_csv = []
+
+    reaction(startup) {=
+        self.received_traces = []
+        self.completed_task_indexes = set()
+        self.total_task_count = 0
+        self.bandwidth = []
+        self.reactor_to_csv = {0: 0, 1: 1, 2: 2}
+
+        import pandas as pd
+        task_df = pd.read_csv(sample_deployment_path("Tasks.csv"))
+        for _, row in task_df.iterrows():
+            name = str(row.iloc[0]).strip()
+            if name and name.lower() != "nan":
+                self.total_task_count += 1
+
+        # Load bandwidth matrix for computing comm durations
+        comm_df = pd.read_csv(project_path(self.bandwidth_csv_path), index_col=0)
+        comm_df.columns = comm_df.columns.str.strip()
+        comm_df.index = comm_df.index.str.strip()
+        csv_names = list(comm_df.columns)
+        n = len(csv_names)
+        self.bandwidth = [[0] * n for _ in range(n)]
+        for i in range(n):
+            for j in range(n):
+                v = comm_df.iloc[i, j]
+                self.bandwidth[i][j] = int(v) if not pd.isna(v) else 0
+    =}
+
+    reaction(r1_output, r2_output, r3_output, r1_trace, r2_trace, r3_trace) {=
+        if self.plotted:
+            return
+
+        for output_port in [r1_output, r2_output, r3_output]:
+            if output_port.is_present and output_port.value is not None:
+                completed_task = output_port.value
+                self.completed_task_indexes.add(completed_task.index)
+
+        trace_by_device = {dev_id: trace for dev_id, trace in self.received_traces}
+        if r1_trace.is_present:
+            trace_by_device[0] = r1_trace.value
+        if r2_trace.is_present:
+            trace_by_device[1] = r2_trace.value
+        if r3_trace.is_present:
+            trace_by_device[2] = r3_trace.value
+        self.received_traces = list(trace_by_device.items())
+
+        all_events = (trace_by_device.get(0, []) + trace_by_device.get(1, []) + trace_by_device.get(2, []))
+
+        comp_events = [e for e in all_events if e.get("type") == "comp"]
+        comm_events = [e for e in all_events if e.get("type") == "comm_send"]
+        traced_task_ids = {
+            e.get("task_index", e.get("task_name"))
+            for e in comp_events
+            if e.get("task_index", e.get("task_name")) is not None
+        }
+        if len(traced_task_ids) < self.total_task_count:
+            return
+
+        self.plotted = True
+
+        # Always show all three devices (indices 0,1,2). HE may assign no work to one of them;
+        # previously we only listed devices with comp events, which hid idle devices like Blackwell.
+        device_index_to_name = {0: "Jetson", 1: "A6000", 2: "Blackwell"}
+        for e in comp_events:
+            device_index_to_name[e["device_index"]] = e["device_name"]
+        # Desired visual order (top -> bottom): Jetson, A6000, Blackwell.
+        desired_top_to_bottom = [0, 1, 2]
+        display_bottom_to_top = list(reversed(desired_top_to_bottom))
+        num_devices = len(display_bottom_to_top)
+
+        device_index_to_comp_row = {}
+        device_index_to_comm_row = {}
+        row_labels = [""] * (2 * num_devices)
+        for i, dev_idx in enumerate(display_bottom_to_top):
+            comm_row = i * 2
+            comp_row = i * 2 + 1
+            device_index_to_comp_row[dev_idx] = comp_row
+            device_index_to_comm_row[dev_idx] = comm_row
+            name = device_index_to_name[dev_idx]
+            row_labels[comp_row] = f"{name}_comp"
+            row_labels[comm_row] = f"{name}_comm"
+
+        tasks = sorted({e["task_name"] for e in comp_events})
+        if not tasks:
+            return
+        cmap = plt.get_cmap("tab10")
+        task_colors = {task: cmap(i % cmap.N) for i, task in enumerate(tasks)}
+
+        trace_origin_sec = min(
+            [e["start_time"] for e in all_events if e.get("start_time") is not None],
+            default=0.0,
+        )
+
+        def to_ms(sec):
+            return float(sec - trace_origin_sec) * 1000.0
+
+        fig_height = max(4, num_devices * 1.5)
+        fig, ax = plt.subplots(figsize=(12, fig_height))
+        bar_height = 0.6
+        xmax_ms = 100.0
+
+        for e in comp_events:
+            row = device_index_to_comp_row[e["device_index"]]
+            start_ms = to_ms(e["start_time"])
+            # dur_ms = to_ms(e["end_time"] - e["start_time"])
+            dur_ms = float(e["end_time"] - e["start_time"]) * 1000.0
+            end_ms = to_ms(e["end_time"])
+            task = e["task_name"]
+            color = task_colors.get(task, "gray")
+            deadline_ms = e.get("deadline_ms", -1)
+            if deadline_ms is not None and int(deadline_ms) > 0:
+                status = "OK" if end_ms <= float(deadline_ms) else "MISSED"
+                xmax_ms = max(xmax_ms, end_ms + 50.0, float(deadline_ms) + 50.0)
+            else:
+                status = "OK" if e.get("deadline_met", True) else "MISSED"
+                xmax_ms = max(xmax_ms, end_ms + 50.0)
+            ax.broken_barh(
+                [(start_ms, dur_ms)],
+                (row - bar_height/2, bar_height),
+                facecolors=color
+            )
+
+        for e in comm_events:
+            from_dev = e["from_device"]
+            to_dev = e["to_device"]
+            start_ms = to_ms(e["start_time"])
+            if e.get("end_time") is not None:
+                # dur_ms = max(0.0, to_ms(e["end_time"] - e["start_time"]))
+                dur_ms = max(0.0, float(e["end_time"] - e["start_time"]) * 1000.0)
+            else:
+                output_size = e.get("output_size", 0)
+                csv_from = self.reactor_to_csv.get(from_dev, from_dev)
+                csv_to = self.reactor_to_csv.get(to_dev, to_dev)
+                bw = self.bandwidth[csv_from][csv_to] if self.bandwidth else 0
+                dur_ms = float(transfer_time_ms(output_size, bw)) if bw > 0 else 0.0
+            task = e["task_name"]
+            color = task_colors.get(task, "gray")
+            xmax_ms = max(xmax_ms, start_ms + dur_ms + 50.0)
+
+            # Draw communication on both sender and receiver comm lanes.
+            comm_rows = [device_index_to_comm_row[from_dev], device_index_to_comm_row[to_dev]]
+            for row in comm_rows:
+                ax.broken_barh(
+                    [(start_ms, dur_ms)],
+                    (row - bar_height/2, bar_height),
+                    facecolors=color,
+                    alpha=0.7
+                )
+
+        # Vertical deadline markers (ms), one line per distinct deadline
+        drawn_deadlines = set()
+        for e in comp_events:
+            dm = e.get("deadline_ms", -1)
+            if dm is None or int(dm) <= 0:
+                continue
+            dm_f = float(dm)
+            if dm_f in drawn_deadlines:
+                continue
+            drawn_deadlines.add(dm_f)
+            ax.axvline(dm_f, color="0.35", linestyle="--", linewidth=1.2, alpha=0.85, zorder=0)
+
+        xmax_ms = max(xmax_ms, 100.0)
+        xmax_ms = float(int(math.ceil(xmax_ms / 100.0)) * 100)
+        ax.set_xlim(0.0, xmax_ms)
+
+        tick_quantum_ms = 100.0
+        max_tick_count = 10
+        if xmax_ms <= tick_quantum_ms * (max_tick_count - 1):
+            x_ticks = [float(v) for v in range(0, int(xmax_ms) + 1, int(tick_quantum_ms))]
+        else:
+            x_ticks = []
+            for i in range(max_tick_count):
+                raw_tick = (xmax_ms * i) / float(max_tick_count - 1)
+                clipped_tick = math.floor(raw_tick / tick_quantum_ms) * tick_quantum_ms
+                if len(x_ticks) == 0 or clipped_tick > x_ticks[-1]:
+                    x_ticks.append(float(clipped_tick))
+            max_clipped_tick = math.floor(xmax_ms / tick_quantum_ms) * tick_quantum_ms
+            if len(x_ticks) > 0:
+                x_ticks[-1] = float(max_clipped_tick)
+        ax.set_xticks(x_ticks)
+        ax.xaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda value, _: f"{int(math.floor(value / tick_quantum_ms) * tick_quantum_ms)}")
+        )
+
+        ax.set_yticks(range(len(row_labels)))
+        ax.set_yticklabels(row_labels)
+        ax.set_xlabel("Time (ms)")
+        ax.set_title("Device Scheduling (from runtime trace)")
+        ax.grid(axis="x", linestyle="--", alpha=0.4)
+        handles = [
+            Line2D([0], [0], color=task_colors[t], lw=8, label=t)
+            for t in tasks
+        ]
+        handles.append(Line2D([0], [0], color="0.35", linestyle="--", lw=1.5, label="Deadline"))
+        ax.legend(handles=handles, title="Task types")
+        plt.tight_layout()
+        out_path = project_path("schedule_trace_deployment.png")
+        plt.savefig(out_path, dpi=150)
+        plt.close(fig)
+        print(f"OutputVisualizer: Wrote {out_path}. Stopping deployment run.", flush=True)
+        request_stop()
+    =}
+}
+
+// main reactor {
+// federated reactor at localhost {
+federated reactor at 10.218.100.78 {
+    // @maxwait(5 sec)
+    d = new TaskDistributor()
+    r_1 = new Jetson()
+    r_2 = new A6000()
+    r_3 = new Blackwell(dummy_task = False)
+
+    // e = new EnvironmentUpdateDetector()
+    // @maxwait(5 sec)
+    o = new OutputVisualizer()
+
+    // e.change -> d.change
+    // e.network_info -> d.network_info
+    d.network_info -> r_1.network_info
+    d.network_info -> r_2.network_info
+    d.network_info -> r_3.network_info
+
+    // v.csv_path -> d.csv_path
+    d.task_chains -> r_1.task_chains, r_2.task_chains, r_3.task_chains
+
+    r_1.send_edge -> r_2.recv_mobile_robot 
+    r_1.send_cloudlet -> r_3.recv_mobile_robot
+    r_2.send_mobile_robot -> r_1.recv_edge 
+    r_2.send_cloudlet -> r_3.recv_edge 
+    r_3.send_mobile_robot -> r_1.recv_cloudlet 
+    r_3.send_edge -> r_2.recv_cloudlet 
+
+    r_1.final_output, r_2.final_output, r_3.final_output -> o.r1_output, o.r2_output, o.r3_output
+    r_1.trace_output -> o.r1_trace
+    r_2.trace_output -> o.r2_trace
+    r_3.trace_output -> o.r3_trace
+
+    //check_deadline
+    // LET by physical time or WCET
+
+
+    // direct packet format: [destination, payload size]
+}
