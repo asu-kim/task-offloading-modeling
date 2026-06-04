@@ -623,6 +623,8 @@ preamble {=
             input_image = reactor.current_packet.get("input_image")
         if not input_image and reactor.current_packet is not None:
             input_image = reactor.current_packet.get("image_path")
+        if input_image == "__zero_image__":
+            return None, "synthetic-zero-image"
         if input_image:
             input_source = _blackwell_resolve_path(input_image)
             return input_source, input_source
@@ -784,6 +786,29 @@ preamble {=
         print(f"{reactor.device_name}: LLM question for {task.name}: {question}", flush=True)
         print(f"{reactor.device_name}: LLM answer for {task.name}: {answer} ({inference_ms} ms)", flush=True)
 
+    def _startup_warmup_enabled():
+        return os.environ.get("DEPLOYMENT_STARTUP_WARMUP", "1").lower() not in ["0", "false", "no"]
+
+    def _run_startup_warmup(reactor):
+        if not _startup_warmup_enabled():
+            print(f"{reactor.device_name}: Startup ML warmup disabled.", flush=True)
+            return
+        if getattr(reactor, "dummy_task", False):
+            print(f"{reactor.device_name}: Skipping startup ML warmup in dummy_task mode.", flush=True)
+            return
+
+        print(f"{reactor.device_name}: Starting GPU warmup (ViT zero-image, LLM default question).", flush=True)
+
+        vit_task = Task(name="WARMUP_VIT", index=-1, execution_times=[0, 0, 0])
+        vit_task.input_image = "__zero_image__"
+        _execute_blackwell_yolos_task(reactor, vit_task)
+
+        llm_task = Task(name="WARMUP_LLM", index=-2, execution_times=[0, 0, 0])
+        llm_task.llm_question = cloudlet_llm_default_question
+        _execute_cloudlet_llm_task(reactor, llm_task)
+
+        print(f"{reactor.device_name}: Startup GPU warmup complete.", flush=True)
+
 =}
 
 reactor A6000(device_index = 1, device_name = "A6000", dummy_task = False) {
@@ -826,6 +851,12 @@ reactor A6000(device_index = 1, device_name = "A6000", dummy_task = False) {
         self.yolo_results = {}
         self.llm_thread = None
         self.llm_error = None
+
+        try:
+            _run_startup_warmup(self)
+        except BaseException as exc:
+            print(f"{self.device_name}: Startup ML warmup failed: {exc}", flush=True)
+            request_stop()
     =}
 
     reaction(start_execution) -> end_execution, llm_done {=
