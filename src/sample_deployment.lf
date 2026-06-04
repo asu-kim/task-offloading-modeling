@@ -26,17 +26,23 @@ preamble {=
 
     logger = logging.getLogger(__name__)
 
+    SAMPLE_DEPLOYMENT_DATA_DIR = Path("data") / "sample_deployment"
+
     def _find_project_root():
         current_file = Path(__file__).resolve()
         for candidate in (current_file.parent, *current_file.parents):
-            if (candidate / "Bandwidth.csv").exists():
+            if (candidate / SAMPLE_DEPLOYMENT_DATA_DIR / "Bandwidth.csv").exists():
                 return candidate
         return current_file.parents[2]
 
     PROJECT_ROOT = _find_project_root()
+    SAMPLE_DEPLOYMENT_ROOT = PROJECT_ROOT / SAMPLE_DEPLOYMENT_DATA_DIR
 
     def project_path(*parts):
         return str(PROJECT_ROOT.joinpath(*parts))
+
+    def sample_deployment_path(*parts):
+        return str(SAMPLE_DEPLOYMENT_ROOT.joinpath(*parts))
 
     def transfer_time_ms(data_size_mb: float, bandwidth_mb_per_sec: int) -> int:
         """Transfer duration used by scheduler model (same convention as inference-offloading-scheduler)."""
@@ -1054,8 +1060,8 @@ reactor TaskSetSource {
     output tasks
 
     reaction(startup) -> tasks {=
-        task_csv_path = project_path("Tasks.csv")
-        dependency_csv_path = project_path("Dependencies.csv")
+        task_csv_path = sample_deployment_path("Tasks.csv")
+        dependency_csv_path = sample_deployment_path("Dependencies.csv")
 
         # Read the CSVs here so the scheduler receives a validated task-set descriptor.
         pd.read_csv(task_csv_path)
@@ -1169,7 +1175,7 @@ reactor EnvironmentUpdateDetector {
     output network_info
 
     reaction(startup) -> change, network_info {=
-        bandwidth_csv_path = project_path("Bandwidth.csv")
+        bandwidth_csv_path = sample_deployment_path("Bandwidth.csv")
         comm_df = pd.read_csv(bandwidth_csv_path, index_col=0)
         comm_df.columns = comm_df.columns.str.strip()
         comm_df.index = comm_df.index.str.strip()
@@ -1198,7 +1204,7 @@ reactor EnvironmentUpdateDetector {
     =}
 }
 
-reactor OutputVisualizer(bandwidth_csv_path = "Bandwidth.csv") {
+reactor OutputVisualizer(bandwidth_csv_path = "data/sample_deployment/Bandwidth.csv") {
     input r1_output
     input r2_output
     input r3_output
@@ -1221,7 +1227,7 @@ reactor OutputVisualizer(bandwidth_csv_path = "Bandwidth.csv") {
         self.reactor_to_csv = {0: 0, 1: 1, 2: 2}
 
         import pandas as pd
-        task_df = pd.read_csv(project_path("Tasks.csv"))
+        task_df = pd.read_csv(sample_deployment_path("Tasks.csv"))
         for _, row in task_df.iterrows():
             name = str(row.iloc[0]).strip()
             if name and name.lower() != "nan":
