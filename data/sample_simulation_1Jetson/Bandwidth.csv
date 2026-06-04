@@ -1,4 +1,4 @@
-,Jetson, A6000, Blackwell
-Jetson, 0, 30, 20
-A6000, 30, 0, 25
-Blackwell, 20, 25, 0
+,Jetson,A6000,Blackwell
+Jetson,0,17,16.25
+A6000,17,0,118
+Blackwell,16.25,118,0
