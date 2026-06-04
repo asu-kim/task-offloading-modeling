@@ -440,7 +440,7 @@ reactor NetworkFabric4Jetson {
     =}
 }
 
-main reactor(fast_enable = False) {
+main reactor(fast_enable = True) {
     s = new HEFTScheduler(num_devices = 6, task_csv_path = "data/sample_simulation_4Jetson/Tasks.csv", dependency_csv_path = "data/sample_simulation_4Jetson/Dependencies.csv", bandwidth_csv_path = "data/sample_simulation_4Jetson/Bandwidth.csv")
     r_1 = new ComputeDevice(device_index = 0, device_type_index = 0, device_name = "Jetson_1", bandwidth_csv_path = "data/sample_simulation_4Jetson/Bandwidth.csv", fast_enable = fast_enable)
     r_2 = new ComputeDevice(device_index = 1, device_type_index = 0, device_name = "Jetson_2", bandwidth_csv_path = "data/sample_simulation_4Jetson/Bandwidth.csv", fast_enable = fast_enable)
