@@ -58,8 +58,7 @@ preamble {=
         if bandwidth == 0:
             return None
 
-        latency_ms = system.latency[source_device_index][target_device_index]
-        return int(latency_ms) + transfer_time_ms(data_size_mb, bandwidth)
+        return transfer_time_ms(data_size_mb, bandwidth)
 
     # Shared deployment-network model. All p2p communications reserve this
     # single channel, so no two packet transfers overlap in logical time.
@@ -1189,11 +1188,7 @@ reactor EnvironmentUpdateDetector {
                 row.append(int(v) if not pd.isna(v) else 0)
             bandwidth.append(row)
 
-        latency = [
-            [0, 150, 120],
-            [150, 0, 130],
-            [120, 130, 0],
-        ]
+        latency = [[0] * len(device_names) for _ in range(len(device_names))]
 
         network_info.set({
             "device_names": device_names,
