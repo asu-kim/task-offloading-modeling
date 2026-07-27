@@ -261,3 +261,6 @@ lfc src/ViTTest.lf
 Run the generated federates from `fed-gen/ViTTest/`.
 
 The current vision test uses an image from `dataset128/coco128/images/train2017/`.
+
+# ToDo Lists
+ - [] Deterministic execution for deployment
