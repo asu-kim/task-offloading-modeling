@@ -44,6 +44,10 @@ preamble {=
     def sample_deployment_path(*parts):
         return str(SAMPLE_DEPLOYMENT_ROOT.joinpath(*parts))
 
+    SAMPLE_DEPLOYMENT_VIT_INPUT_IMAGE = project_path(
+        "dataset128", "coco128", "images", "train2017", "example_input.png"
+    )
+
     def transfer_time_ms(data_size_mb: float, bandwidth_mb_per_sec: int) -> int:
         """Transfer duration used by scheduler model (same convention as inference-offloading-scheduler)."""
         if data_size_mb == 0 or bandwidth_mb_per_sec == 0:
@@ -1135,6 +1139,8 @@ reactor Scheduler {
                 "task": task,
                 "device": task_to_device[task_index],
                 "source_device": task.source_device_index,
+                "input_image": SAMPLE_DEPLOYMENT_VIT_INPUT_IMAGE,
+                "image_path": SAMPLE_DEPLOYMENT_VIT_INPUT_IMAGE,
                 "continuations": continuations
             }
 
