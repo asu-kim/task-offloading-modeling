@@ -5,6 +5,7 @@ preamble {=
     import pprint
     import threading
     import time
+    import traceback
     from collections import deque
     from dataclasses import dataclass, field
     from typing import Deque, List, Tuple
@@ -653,6 +654,15 @@ preamble {=
         if input_image == "__zero_image__":
             return None, "synthetic-zero-image"
         if input_image:
+            if isinstance(input_image, (bytes, bytearray)):
+                input_image = input_image.decode("utf-8", errors="ignore")
+            elif not isinstance(input_image, (str, os.PathLike)):
+                print(
+                    f"{reactor.device_name}: Unexpected YOLOS input_image type "
+                    f"{type(input_image)}; coercing to string.",
+                    flush=True,
+                )
+                input_image = str(input_image)
             input_source = _blackwell_resolve_path(input_image)
             return input_source, input_source
         return _blackwell_next_yolos_input(imgsz)
@@ -952,6 +962,7 @@ reactor Jetson_3devices(device_index = 0, device_name = "Jetson", dummy_task = F
                 _execute_blackwell_yolos_task(self, task)
             except BaseException as exc:
                 print(f"{self.device_name}: YOLOS task {task.name} failed: {exc}", flush=True)
+                print(traceback.format_exc(), flush=True)
                 request_stop()
                 return
             end_execution.schedule(0)
