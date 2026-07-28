@@ -2,9 +2,13 @@ target Python {
     coordination: decentralized
 }
 
-import Jetson_3devices from "../lib/deployment/Jetson_3devices.lf"
-import A6000_3devices from "../lib/deployment/A6000_3devices.lf"
-import Blackwell_3devices from "../lib/deployment/Blackwell_3devices.lf"
+// import Jetson_3devices from "../lib/deployment/Jetson_3devices.lf"
+// import A6000_3devices from "../lib/deployment/A6000_3devices.lf"
+// import Blackwell_3devices from "../lib/deployment/Blackwell_3devices.lf"
+
+import Jetson from "../lib/deployment/Jetson.lf"
+import A6000 from "../lib/deployment/A6000.lf"
+import Blackwell from "../lib/deployment/Blackwell.lf"
 
 preamble {=
     import sys
@@ -1437,9 +1441,12 @@ reactor OutputVisualizer(bandwidth_csv_path = "data/sample_deployment/Bandwidth.
 federated reactor at 10.218.100.78 {
     // @maxwait(5 sec)
     d = new TaskDistributor()
-    r_1 = new Jetson_3devices()
-    r_2 = new A6000_3devices()
-    r_3 = new Blackwell_3devices(dummy_task = False)
+    // r_1 = new Jetson_3devices()
+    // r_2 = new A6000_3devices()
+    // r_3 = new Blackwell_3devices(dummy_task = False)
+    r_1 = new Jetson()
+    r_2 = new A6000()
+    r_3 = new Blackwell(dummy_task = False)
 
     // e = new EnvironmentUpdateDetector()
     // @maxwait(5 sec)
