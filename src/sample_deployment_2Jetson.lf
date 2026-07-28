@@ -10,7 +10,6 @@ import Blackwell_4devices from "../lib/deployment/Blackwell_4devices.lf"
 preamble {=
     import sys
     import csv as csv_module
-    import random
     import math
     import logging
     import os
@@ -177,6 +176,8 @@ preamble {=
 
             # Initialize tasks
             df = pd.read_csv(self.task_csv_path)
+            if "Source" not in df.columns:
+                sys.exit("Error: Tasks CSV must contain a Source column")
 
             index = 0
             # Initialize Task list
@@ -190,6 +191,17 @@ preamble {=
                 et_c_ms = int(float(row.iloc[4]))
                 # Internal device index order: 0 Jetson_1, 1 Jetson_2, 2 A6000, 3 Blackwell
                 execution_times_ms = [et_a_ms, et_a_ms, et_b_ms, et_c_ms]
+                source_value = row["Source"]
+                if pd.isna(source_value):
+                    sys.exit(f"Error: Task {name} has no source device")
+                source_device_index = int(source_value)
+                if float(source_value) != source_device_index:
+                    sys.exit(f"Error: Task {name} has a non-integer source device: {source_value}")
+                if source_device_index < 0 or source_device_index >= self.num_devices:
+                    sys.exit(
+                        f"Error: Task {name} source device {source_device_index} "
+                        f"is outside the valid range 0..{self.num_devices - 1}"
+                    )
                 task = Task(
                     name=name,
                     index=index,
@@ -197,7 +209,7 @@ preamble {=
                     execution_times=execution_times_ms,
                     input_size=int(row.iloc[5]),
                     output_size=int(row.iloc[6]),
-                    source_device_index=0  # Will be set later for source tasks
+                    source_device_index=source_device_index
                     # destination_device_index=int(row.iloc[8])
                 )
                 self.tasks.append(task)
@@ -232,21 +244,6 @@ preamble {=
                             self.tasks[j].parent_task_indexes.append(i)
                         if j not in self.tasks[i].child_task_indexes:
                             self.tasks[i].child_task_indexes.append(j)
-            
-            # Randomly assign source tasks (tasks with no parents) to Jetson devices
-            jetson_device_indices = [i for i, device in enumerate(self.devices) if device.name.startswith("Jetson")]
-            
-            if len(jetson_device_indices) == 0:
-                sys.exit("Error: No Jetson device found in system")
-            
-            # Find all source tasks (tasks with no parents)
-            source_tasks = [task for task in self.tasks if len(task.parent_task_indexes) == 0]
-            
-            # Randomly assign each source task to a Jetson device
-            for task in source_tasks:
-                selected_index = random.choice(jetson_device_indices)
-                task.source_device_index = selected_index
-                logger.debug(f"Assigned source task {task.name} to device {selected_index} ({self.devices[selected_index].name})")
             
             # Set period to the largest deadline from tasks
             # This ensures period is always set to the maximum deadline
@@ -1313,6 +1310,74 @@ reactor OutputVisualizer(bandwidth_csv_path = "data/sample_deployment_2Jetson/Ba
         def to_ms(sec):
             return float(sec - trace_origin_sec) * 1000.0
 
+        sorted_comp_events = sorted(comp_events, key=lambda e: (e["end_time"], e["task_name"]))
+        first_start_ms = min(to_ms(e["start_time"]) for e in sorted_comp_events)
+        last_finish_ms = max(to_ms(e["end_time"]) for e in sorted_comp_events)
+        makespan_ms = last_finish_ms - first_start_ms
+        miss_count = 0
+        tardiness_values_ms = []
+        task_summary_rows = []
+        for event in sorted_comp_events:
+            deadline_ms = event.get("deadline_ms", -1)
+            end_ms = to_ms(event["end_time"])
+            if deadline_ms is None or int(deadline_ms) <= 0:
+                tardiness_ms = 0.0
+                deadline_status = "N/A"
+            else:
+                tardiness_ms = max(0.0, end_ms - float(deadline_ms))
+                deadline_status = "OK" if tardiness_ms == 0.0 else "MISSED"
+                if tardiness_ms > 0.0:
+                    miss_count += 1
+            tardiness_values_ms.append(tardiness_ms)
+            task_summary_rows.append({
+                "task_name": event["task_name"],
+                "device_name": event["device_name"],
+                "start_ms": to_ms(event["start_time"]),
+                "end_ms": end_ms,
+                "deadline_ms": deadline_ms,
+                "deadline_status": deadline_status,
+                "tardiness_ms": tardiness_ms,
+            })
+
+        total_tasks = len(task_summary_rows)
+        miss_rate = (miss_count / total_tasks) if total_tasks > 0 else 0.0
+        max_tardiness_ms = max(tardiness_values_ms) if tardiness_values_ms else 0.0
+        average_tardiness_ms = (
+            sum(tardiness_values_ms) / total_tasks if total_tasks > 0 else 0.0
+        )
+        summary_lines = [
+            "Overall Metrics",
+            f"total_tasks: {total_tasks}",
+            f"first_start_ms: {first_start_ms:.3f}",
+            f"last_finish_ms: {last_finish_ms:.3f}",
+            f"makespan_ms: {makespan_ms:.3f}",
+            f"deadline_miss_count: {miss_count}",
+            f"deadline_miss_rate: {miss_rate:.6f}",
+            f"max_tardiness_ms: {max_tardiness_ms:.3f}",
+            f"average_tardiness_ms: {average_tardiness_ms:.3f}",
+            "",
+            "Per-Task Results",
+            "task_name,device_name,start_ms,end_ms,deadline_ms,deadline_status,tardiness_ms",
+        ]
+        for row in task_summary_rows:
+            deadline_ms = row["deadline_ms"]
+            deadline_str = (
+                "N/A"
+                if deadline_ms is None or int(deadline_ms) <= 0
+                else f"{float(deadline_ms):.3f}"
+            )
+            summary_lines.append(
+                "{},{},{:.3f},{:.3f},{},{},{:.3f}".format(
+                    row["task_name"],
+                    row["device_name"],
+                    row["start_ms"],
+                    row["end_ms"],
+                    deadline_str,
+                    row["deadline_status"],
+                    row["tardiness_ms"],
+                )
+            )
+
         fig_height = max(4, num_devices * 1.5)
         fig, ax = plt.subplots(figsize=(12, fig_height))
         bar_height = 0.6
@@ -1425,10 +1490,17 @@ reactor OutputVisualizer(bandwidth_csv_path = "data/sample_deployment_2Jetson/Ba
         handles.append(Line2D([0], [0], color="0.35", linestyle="--", lw=1.5, label="Deadline"))
         ax.legend(handles=handles, title="Task types")
         plt.tight_layout()
-        out_path = project_path("schedule_trace_deployment.png")
-        plt.savefig(out_path, dpi=150)
+        image_path = project_path("schedule_trace_deployment.png")
+        plt.savefig(image_path, dpi=150)
         plt.close(fig)
-        print(f"OutputVisualizer: Wrote {out_path}. Stopping deployment run.", flush=True)
+        summary_path = project_path("schedule_trace_deployment.txt")
+        with open(summary_path, "w", encoding="utf-8") as summary_file:
+            summary_file.write("\n".join(summary_lines) + "\n")
+        print(
+            f"OutputVisualizer: Wrote {image_path} and {summary_path}. "
+            "Stopping deployment run.",
+            flush=True,
+        )
         request_stop()
     =}
 }
