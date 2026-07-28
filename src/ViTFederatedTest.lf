@@ -4,6 +4,30 @@ target Python {
 
 import Jetson_3devices from "../lib/deployment/Jetson_3devices.lf"
 
+preamble {=
+    from dataclasses import dataclass, field
+    from typing import List
+
+    @dataclass
+    class Task:
+        name: str = ""
+        index: int = 0
+        deadline: int = -1
+        execution_times: List[int] = field(default_factory=list)
+        child_task_indexes: List[int] = field(default_factory=list, repr=False)
+        parent_task_indexes: List[int] = field(default_factory=list, repr=False)
+        input_size: int = 0
+        output_size: int = 0
+        source_device_index: int = 0
+        priority: float = 0
+        ready_time: int = -1
+        current_device: str = ""
+        communication_start_time: int = 0
+        communication_end_time: int = 0
+        computation_start_time: int = 0
+        computation_end_time: int = 0
+=}
+
 reactor VITTaskSource {
     output task_chains
 
