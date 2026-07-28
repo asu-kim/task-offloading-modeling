@@ -820,9 +820,6 @@ preamble {=
     def _startup_warmup_enabled():
         return os.environ.get("DEPLOYMENT_STARTUP_WARMUP", "1").lower() not in ["0", "false", "no"]
 
-    def _startup_llm_warmup_enabled():
-        return os.environ.get("DEPLOYMENT_STARTUP_WARMUP_LLM", "1").lower() not in ["0", "false", "no"]
-
     def _run_startup_warmup(reactor):
         if not _startup_warmup_enabled():
             print(f"{reactor.device_name}: Startup ML warmup disabled.", flush=True)
@@ -837,12 +834,9 @@ preamble {=
         vit_task.input_image = "__zero_image__"
         _execute_blackwell_yolos_task(reactor, vit_task)
 
-        if _startup_llm_warmup_enabled():
-            llm_task = Task(name="WARMUP_LLM", index=-2, execution_times=[0, 0, 0])
-            llm_task.llm_question = cloudlet_llm_default_question
-            _execute_cloudlet_llm_task(reactor, llm_task)
-        else:
-            print(f"{reactor.device_name}: Startup LLM warmup disabled.", flush=True)
+        llm_task = Task(name="WARMUP_LLM", index=-2, execution_times=[0, 0, 0])
+        llm_task.llm_question = cloudlet_llm_default_question
+        _execute_cloudlet_llm_task(reactor, llm_task)
 
         print(f"{reactor.device_name}: Startup GPU warmup complete.", flush=True)
 
@@ -861,8 +855,6 @@ reactor Blackwell_3devices(device_index = 2, device_name = "Blackwell", dummy_ta
     state yolo_results
     state llm_thread
     state llm_error
-    state vit_thread
-    state vit_error
 
     input task_chains
     input recv_mobile_robot
@@ -872,7 +864,6 @@ reactor Blackwell_3devices(device_index = 2, device_name = "Blackwell", dummy_ta
     logical action end_execution
     logical action send_packet
     physical action llm_done
-    physical action vit_done
 
     output send_mobile_robot
     output send_edge
@@ -891,8 +882,6 @@ reactor Blackwell_3devices(device_index = 2, device_name = "Blackwell", dummy_ta
         self.yolo_results = {}
         self.llm_thread = None
         self.llm_error = None
-        self.vit_thread = None
-        self.vit_error = None
 
         try:
             _run_startup_warmup(self)
@@ -901,7 +890,7 @@ reactor Blackwell_3devices(device_index = 2, device_name = "Blackwell", dummy_ta
             request_stop()
     =}
 
-    reaction(start_execution) -> end_execution, llm_done, vit_done {=
+    reaction(start_execution) -> end_execution, llm_done {=
         if self.current_packet is None:
             return
 
@@ -959,19 +948,13 @@ reactor Blackwell_3devices(device_index = 2, device_name = "Blackwell", dummy_ta
 
                 threading.Thread(target=worker, daemon=True).start()
                 return
-            self.vit_error = None
-
-            def worker():
-                try:
-                    _execute_blackwell_yolos_task(self, task)
-                except BaseException as exc:
-                    self.vit_error = exc
-                    print(f"{self.device_name}: YOLOS task {task.name} failed: {exc}", flush=True)
-                finally:
-                    vit_done.schedule(0)
-
-            self.vit_thread = threading.Thread(target=worker, daemon=True)
-            self.vit_thread.start()
+            try:
+                _execute_blackwell_yolos_task(self, task)
+            except BaseException as exc:
+                print(f"{self.device_name}: YOLOS task {task.name} failed: {exc}", flush=True)
+                request_stop()
+                return
+            end_execution.schedule(0)
         else:
             time.sleep(exec_time_ms / 1000.0 / time_unit)
             end_execution.schedule(MSEC(int(exec_time_ms)))
@@ -987,16 +970,6 @@ reactor Blackwell_3devices(device_index = 2, device_name = "Blackwell", dummy_ta
             return
         self.llm_thread = None
         if self.llm_error is not None:
-            request_stop()
-            return
-        end_execution.schedule(0)
-    =}
-
-    reaction(vit_done) -> end_execution {=
-        if self.current_packet is None:
-            return
-        self.vit_thread = None
-        if self.vit_error is not None:
             request_stop()
             return
         end_execution.schedule(0)
