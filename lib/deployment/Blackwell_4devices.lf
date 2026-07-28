@@ -871,8 +871,9 @@ reactor Blackwell_4devices(device_index = 3, device_name = "Blackwell", dummy_ta
     output send_a6000
     output final_output
     output trace_output
+    output ready
 
-    reaction(startup) {=
+    reaction(startup) -> ready {=
         self.task_queue = []
         self.current_packet = None
         self.pending_task_packets = {}
@@ -890,6 +891,8 @@ reactor Blackwell_4devices(device_index = 3, device_name = "Blackwell", dummy_ta
         except BaseException as exc:
             print(f"{self.device_name}: Startup ML warmup failed: {exc}", flush=True)
             request_stop()
+            return
+        ready.set(True)
     =}
 
     reaction(start_execution) -> end_execution, llm_done {=

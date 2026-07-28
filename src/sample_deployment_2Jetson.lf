@@ -1077,26 +1077,47 @@ reactor Scheduler {
     input change
     input tasks
     input network_info
+    input ready_jetson_1
+    input ready_jetson_2
+    input ready_a6000
+    input ready_blackwell
 
     state dev_jetson_1 = [0, [], [], []]  # Jetson_1 device_index 0
     state dev_jetson_2 = [1, [], [], []]  # Jetson_2 device_index 1
     state dev_a6000 = [2, [], [], []]     # A6000 device_index 2
     state dev_blackwell = [3, [], [], []]  # Blackwell device_index 3
     state task_set = []
+    state network_info_value
+    state devices_ready = [False, False, False, False]
+    state chains_emitted = False
     // state tasks = [[0, 6, [4, 3, 2], 4, 4], [1, 10, [8, 5, 4], 4, 1]] # [index, deadline, [exec_time on Jetson, A6000, Blackwell], input_size, output_size]
     // state bandwidth = [[0, 2, 5], [2, 0, 3], [5, 3, 0]] # link rates (MB/s) between devices
     output[4] task_chains
 
-    reaction(change, tasks, network_info) -> task_chains {=
+    reaction(change, tasks, network_info, ready_jetson_1, ready_jetson_2, ready_a6000, ready_blackwell) -> task_chains {=
         if tasks.is_present:
             self.task_set = tasks.value
+        if network_info.is_present:
+            self.network_info_value = network_info.value
 
-        if len(self.task_set) == 0 or not network_info.is_present:
+        readiness_ports = [ready_jetson_1, ready_jetson_2, ready_a6000, ready_blackwell]
+        for device_index, readiness_port in enumerate(readiness_ports):
+            if readiness_port.is_present and readiness_port.value:
+                self.devices_ready[device_index] = True
+
+        if self.chains_emitted:
+            return
+        if len(self.task_set) == 0 or self.network_info_value is None:
+            return
+        if not all(self.devices_ready):
+            print(f"TaskDistributor: Waiting for device readiness: {self.devices_ready}", flush=True)
             return
 
+        self.chains_emitted = True
+        print("TaskDistributor: All devices ready; releasing initial task chains.", flush=True)
         task_csv_path = self.task_set["task_csv_path"]
         dependency_csv_path = self.task_set["dependency_csv_path"]
-        network_info_value = network_info.value
+        network_info_value = self.network_info_value
 
         system = System(task_csv_path=task_csv_path, 
                     dependency_csv_path=dependency_csv_path, 
@@ -1152,8 +1173,10 @@ reactor Scheduler {
 }
 
 reactor TaskDistributor {
-    // input change
-    // input network_info
+    input ready_jetson_1
+    input ready_jetson_2
+    input ready_a6000
+    input ready_blackwell
 
     output[4] task_chains
 
@@ -1165,6 +1188,10 @@ reactor TaskDistributor {
     t.tasks -> s.tasks
     e.change -> s.change
     e.network_info -> s.network_info
+    ready_jetson_1 -> s.ready_jetson_1
+    ready_jetson_2 -> s.ready_jetson_2
+    ready_a6000 -> s.ready_a6000
+    ready_blackwell -> s.ready_blackwell
     s.task_chains -> task_chains
 }
 
@@ -1514,6 +1541,10 @@ federated reactor at 10.218.100.78 {
     r_4 = new Blackwell_4devices(device_index = 3, device_name = "Blackwell", dummy_task = False)
     o = new OutputVisualizer()
 
+    r_1.ready -> d.ready_jetson_1
+    r_2.ready -> d.ready_jetson_2
+    r_3.ready -> d.ready_a6000
+    r_4.ready -> d.ready_blackwell
     d.task_chains -> r_1.task_chains, r_2.task_chains, r_3.task_chains, r_4.task_chains
 
     r_1.send_jetson -> r_2.recv_jetson

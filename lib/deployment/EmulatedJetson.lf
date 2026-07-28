@@ -284,8 +284,9 @@ reactor EmulatedJetson(device_index = 1, device_name = "Jetson_2", dummy_task = 
     output send_blackwell
     output final_output
     output trace_output
+    output ready
 
-    reaction(startup) {=
+    reaction(startup) -> ready {=
         self.task_queue = []
         self.current_packet = None
         self.pending_task_packets = {}
@@ -296,6 +297,7 @@ reactor EmulatedJetson(device_index = 1, device_name = "Jetson_2", dummy_task = 
         self.llm_results = {}
         self.yolo_results = {}
         print(f"{self.device_name}: Startup ML warmup skipped in emulated mode.", flush=True)
+        ready.set(True)
     =}
 
     reaction(start_execution) -> end_execution {=
