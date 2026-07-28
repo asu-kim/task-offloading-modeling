@@ -409,12 +409,10 @@ preamble {=
 
     class _BlackwellYolosTorchRunner:
         def __init__(self, hf_model, imgsz, conf, device):
-            import numpy as np
             import torch
             from PIL import Image
             from transformers import YolosForObjectDetection, YolosImageProcessor
 
-            self.np = np
             self.torch = torch
             self.Image = Image
             self.processor = YolosImageProcessor.from_pretrained(hf_model)
@@ -434,16 +432,10 @@ preamble {=
         def infer(self, path):
             image = self._read_image(path)
             w0, h0 = image.size
-            # Passing a PIL image makes Transformers use torchvision.pil_to_tensor().
-            # The federated runtime can fail in that conversion for file-backed
-            # images even though a standalone torch.as_tensor(numpy_array) works.
-            # Use a contiguous uint8 NumPy image so Transformers takes its NumPy
-            # preprocessing path instead.
-            image_array = self.np.array(image, dtype=self.np.uint8, copy=True)
 
             start_ns = time.perf_counter_ns()
             inputs = self.processor(
-                images=image_array,
+                images=image,
                 size={"height": self.imgsz, "width": self.imgsz},
                 return_tensors="pt",
             )
@@ -838,6 +830,9 @@ preamble {=
     def _startup_warmup_enabled():
         return os.environ.get("DEPLOYMENT_STARTUP_WARMUP", "1").lower() not in ["0", "false", "no"]
 
+    def _startup_llm_warmup_enabled():
+        return os.environ.get("DEPLOYMENT_STARTUP_WARMUP_LLM", "1").lower() not in ["0", "false", "no"]
+
     def _run_startup_warmup(reactor):
         if not _startup_warmup_enabled():
             print(f"{reactor.device_name}: Startup ML warmup disabled.", flush=True)
@@ -852,9 +847,12 @@ preamble {=
         vit_task.input_image = "__zero_image__"
         _execute_blackwell_yolos_task(reactor, vit_task)
 
-        llm_task = Task(name="WARMUP_LLM", index=-2, execution_times=[0, 0, 0])
-        llm_task.llm_question = cloudlet_llm_default_question
-        _execute_cloudlet_llm_task(reactor, llm_task)
+        if _startup_llm_warmup_enabled():
+            llm_task = Task(name="WARMUP_LLM", index=-2, execution_times=[0, 0, 0])
+            llm_task.llm_question = cloudlet_llm_default_question
+            _execute_cloudlet_llm_task(reactor, llm_task)
+        else:
+            print(f"{reactor.device_name}: Startup LLM warmup disabled.", flush=True)
 
         print(f"{reactor.device_name}: Startup GPU warmup complete.", flush=True)
 

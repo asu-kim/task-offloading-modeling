@@ -820,6 +820,9 @@ preamble {=
     def _startup_warmup_enabled():
         return os.environ.get("DEPLOYMENT_STARTUP_WARMUP", "1").lower() not in ["0", "false", "no"]
 
+    def _startup_llm_warmup_enabled():
+        return os.environ.get("DEPLOYMENT_STARTUP_WARMUP_LLM", "1").lower() not in ["0", "false", "no"]
+
     def _run_startup_warmup(reactor):
         if not _startup_warmup_enabled():
             print(f"{reactor.device_name}: Startup ML warmup disabled.", flush=True)
@@ -834,9 +837,12 @@ preamble {=
         vit_task.input_image = "__zero_image__"
         _execute_blackwell_yolos_task(reactor, vit_task)
 
-        llm_task = Task(name="WARMUP_LLM", index=-2, execution_times=[0, 0, 0])
-        llm_task.llm_question = cloudlet_llm_default_question
-        _execute_cloudlet_llm_task(reactor, llm_task)
+        if _startup_llm_warmup_enabled():
+            llm_task = Task(name="WARMUP_LLM", index=-2, execution_times=[0, 0, 0])
+            llm_task.llm_question = cloudlet_llm_default_question
+            _execute_cloudlet_llm_task(reactor, llm_task)
+        else:
+            print(f"{reactor.device_name}: Startup LLM warmup disabled.", flush=True)
 
         print(f"{reactor.device_name}: Startup GPU warmup complete.", flush=True)
 
