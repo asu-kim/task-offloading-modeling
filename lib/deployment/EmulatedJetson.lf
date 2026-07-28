@@ -4,10 +4,18 @@ preamble {=
     import time
     from collections import deque
     from dataclasses import dataclass, field
-    from typing import Deque, List
+    from typing import Deque, List, Tuple
 
     time_unit = 1
     cloudlet_llm_default_question = "What is the opposite of tall?"
+
+    @dataclass
+    class Device:
+        name: str = ""
+        index: int = 0
+        task_queue: Deque["Task"] = field(default_factory=deque)
+        comm_channel_available: int = 0
+        comm_queue: list[Tuple[str, int, int]] = field(default_factory=list)
 
     @dataclass
     class Task:
