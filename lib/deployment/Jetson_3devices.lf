@@ -409,10 +409,12 @@ preamble {=
 
     class _BlackwellYolosTorchRunner:
         def __init__(self, hf_model, imgsz, conf, device):
+            import numpy as np
             import torch
             from PIL import Image
             from transformers import YolosForObjectDetection, YolosImageProcessor
 
+            self.np = np
             self.torch = torch
             self.Image = Image
             self.processor = YolosImageProcessor.from_pretrained(hf_model)
@@ -432,10 +434,16 @@ preamble {=
         def infer(self, path):
             image = self._read_image(path)
             w0, h0 = image.size
+            # Passing a PIL image makes Transformers use torchvision.pil_to_tensor().
+            # The federated runtime can fail in that conversion for file-backed
+            # images even though a standalone torch.as_tensor(numpy_array) works.
+            # Use a contiguous uint8 NumPy image so Transformers takes its NumPy
+            # preprocessing path instead.
+            image_array = self.np.array(image, dtype=self.np.uint8, copy=True)
 
             start_ns = time.perf_counter_ns()
             inputs = self.processor(
-                images=image,
+                images=image_array,
                 size={"height": self.imgsz, "width": self.imgsz},
                 return_tensors="pt",
             )
