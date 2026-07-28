@@ -73,7 +73,7 @@ preamble {=
             reactor.current_packet = reactor.task_queue.pop(0)
             task = reactor.current_packet["task"]
             print(f"{reactor.device_name}: Schedule task {task.name}")
-            start_execution.schedule(MSEC(1))
+            start_execution.schedule(0)
 
     def _record_arrived_packet(reactor, packet):
         if not isinstance(packet, dict):
@@ -316,7 +316,7 @@ reactor EmulatedJetson(device_index = 1, device_name = "Jetson_2", dummy_task = 
             end_execution.schedule(0)
         else:
             time.sleep(exec_time_ms / 1000.0 / time_unit)
-            end_execution.schedule(MSEC(int(exec_time_ms)))
+            end_execution.schedule(0)
     =} deadline(10000 sec) {=
         print(f"In {self.device_name}'s deadline handler.")
         elapsed_logical_time = lf.time.logical_elapsed()
