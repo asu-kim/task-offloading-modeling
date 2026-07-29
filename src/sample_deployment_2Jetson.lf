@@ -1517,7 +1517,7 @@ reactor OutputVisualizer(bandwidth_csv_path = "data/sample_deployment_2Jetson/Ba
         handles.append(Line2D([0], [0], color="0.35", linestyle="--", lw=1.5, label="Deadline"))
         ax.legend(handles=handles, title="Task types")
         plt.tight_layout()
-        image_path = project_path("schedule_trace_deployment.png")
+        image_path = project_path("schedule_trace_deployment_2Jetson.png")
         plt.savefig(image_path, dpi=150)
         plt.close(fig)
         summary_path = project_path("schedule_trace_deployment.txt")
