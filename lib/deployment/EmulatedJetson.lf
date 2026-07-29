@@ -73,7 +73,7 @@ preamble {=
             reactor.current_packet = reactor.task_queue.pop(0)
             task = reactor.current_packet["task"]
             print(f"{reactor.device_name}: Schedule task {task.name}")
-            start_execution.schedule(0)
+            start_execution.schedule(MSEC(1))
 
     def _record_arrived_packet(reactor, packet):
         if not isinstance(packet, dict):
