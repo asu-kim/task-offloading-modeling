@@ -1,5 +1,6 @@
 target Python
 preamble {=
+    import os
     import pprint
     import time
     from collections import deque
@@ -123,6 +124,8 @@ preamble {=
         for key, value in packet.items():
             if key == "task":
                 snapshot[key] = _task_snapshot(value)
+            elif key == "input_image_bytes" and isinstance(value, (bytes, bytearray, memoryview)):
+                snapshot[key] = {"type": "bytes", "size": len(value)}
             elif key == "parent_task":
                 snapshot[key] = _task_snapshot(value)
             elif key == "continuations" and isinstance(value, list):
@@ -157,11 +160,36 @@ preamble {=
         for key, value in yolos_fields.items():
             packet[key] = value
 
+    def _read_transfer_image_tensor_bytes(image_ref):
+        if not image_ref or not isinstance(image_ref, str):
+            return None, None
+
+        candidate_path = os.path.expanduser(image_ref)
+        if not os.path.isabs(candidate_path):
+            candidate_path = os.path.abspath(candidate_path)
+        if not os.path.isfile(candidate_path):
+            return None, None
+
+        try:
+            from PIL import Image
+            with Image.open(candidate_path) as image_obj:
+                rgb_image = image_obj.convert("RGB")
+                width, height = rgb_image.size
+                return rgb_image.tobytes(), (height, width, 3)
+        except BaseException as exc:
+            print(f"Failed to read transfer image bytes from {candidate_path}: {exc}", flush=True)
+            return None, None
+
     def _assign_packet_image(packet, image_ref):
         if not isinstance(packet, dict) or not image_ref:
             return
         packet["input_image"] = image_ref
         packet["image_path"] = image_ref
+        image_bytes, image_shape = _read_transfer_image_tensor_bytes(image_ref)
+        if image_bytes is not None:
+            packet["input_image_bytes"] = image_bytes
+            packet["input_image_shape"] = image_shape
+            packet["input_image_byte_count"] = len(image_bytes)
 
     def _pick_transfer_image(packet=None, completed_task=None):
         if isinstance(packet, dict):
