@@ -1405,6 +1405,39 @@ reactor OutputVisualizer(bandwidth_csv_path = "data/sample_deployment_2Jetson/Ba
                 )
             )
 
+        summary_lines.extend([
+            "",
+            "Communication Events",
+            "task_name,from_device,to_device,start_ms,end_ms,duration_ms,output_size",
+        ])
+        for event in sorted(comm_events, key=lambda e: (e.get("start_time", 0.0), e.get("task_name", ""))):
+            start_time_sec = event.get("start_time")
+            end_time_sec = event.get("end_time")
+            start_ms = to_ms(start_time_sec) if start_time_sec is not None else 0.0
+            if end_time_sec is not None:
+                end_ms = to_ms(end_time_sec)
+                duration_ms = max(0.0, float(end_time_sec - start_time_sec) * 1000.0)
+            else:
+                output_size = event.get("output_size", 0)
+                from_dev = event.get("from_device")
+                to_dev = event.get("to_device")
+                csv_from = self.reactor_to_csv.get(from_dev, from_dev)
+                csv_to = self.reactor_to_csv.get(to_dev, to_dev)
+                bw = self.bandwidth[csv_from][csv_to] if self.bandwidth else 0
+                duration_ms = float(transfer_time_ms(output_size, bw)) if bw > 0 else 0.0
+                end_ms = start_ms + duration_ms
+            summary_lines.append(
+                "{},{},{},{:.3f},{:.3f},{:.3f},{}".format(
+                    event.get("task_name", ""),
+                    event.get("from_device", ""),
+                    event.get("to_device", ""),
+                    start_ms,
+                    end_ms,
+                    duration_ms,
+                    event.get("output_size", 0),
+                )
+            )
+
         fig_height = max(4, num_devices * 1.5)
         fig, ax = plt.subplots(figsize=(12, fig_height))
         bar_height = 0.6
