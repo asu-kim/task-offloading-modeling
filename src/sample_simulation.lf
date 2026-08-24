@@ -30,11 +30,11 @@ preamble {=
     def project_path(*parts):
         return str(PROJECT_ROOT.joinpath(*parts))
 
-    def transfer_time_ms(data_size_mb: float, bandwidth_mb_per_sec: int) -> int:
+    def transfer_time_ms(data_size_kb: float, bandwidth_mb_per_sec: int) -> int:
         """Transfer duration used by scheduler model (same convention as inference-offloading-scheduler)."""
-        if data_size_mb == 0 or bandwidth_mb_per_sec == 0:
+        if data_size_kb == 0 or bandwidth_mb_per_sec == 0:
             return 0
-        return int(math.ceil(float(data_size_mb) / float(bandwidth_mb_per_sec)))
+        return int(math.ceil(float(data_size_kb) / float(bandwidth_mb_per_sec)))
 
     @dataclass
     class Task:

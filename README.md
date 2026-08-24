@@ -48,8 +48,8 @@ The scheduler reads the task file row by row. The current parser consumes the co
 | `ET on A` | Execution time on device type A / Jetson in milliseconds |
 | `ET on B` | Execution time on device type B / A6000 in milliseconds |
 | `ET on C` | Execution time on device type C / Blackwell in milliseconds |
-| `Input Size` | Input payload size |
-| `Output Size` | Output payload size |
+| `Input Size` | Input payload size in kilobytes (KB) |
+| `Output Size` | Output payload size in kilobytes (KB) |
 | `Source` | Present in the CSV, currently not used by the main parser |
 | `Destination` | Present in the CSV, currently not used by the main parser |
 

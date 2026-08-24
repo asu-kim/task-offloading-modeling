@@ -28,10 +28,10 @@ preamble {=
     def scenario_path(filename: str) -> str:
         return project_path("data", "sample_simulation_1Jetson", filename)
 
-    def transfer_time_ms(data_size_mb: float, bandwidth_mb_per_sec: int) -> int:
-        if data_size_mb == 0 or bandwidth_mb_per_sec == 0:
+    def transfer_time_ms(data_size_kb: float, bandwidth_mb_per_sec: int) -> int:
+        if data_size_kb == 0 or bandwidth_mb_per_sec == 0:
             return 0
-        return int(math.ceil(float(data_size_mb) / float(bandwidth_mb_per_sec)))
+        return int(math.ceil(float(data_size_kb) / float(bandwidth_mb_per_sec)))
 =}
 
 reactor EnvironmentUpdateDetector {
@@ -239,7 +239,7 @@ reactor OutputVisualizer1Jetson {
         ax.grid(axis="x", linestyle="--", alpha=0.4)
         handles = [Line2D([0], [0], color=task_colors[t], lw=8, label=t) for t in tasks]
         handles.append(Line2D([0], [0], color="0.35", linestyle="--", lw=1.5, label="Deadline"))
-        ax.legend(handles=handles, title="Task types", ncol=2)
+        ax.legend(handles=handles, title="Task types", ncol=1)
         plt.tight_layout()
         plt.savefig(project_path("schedule_trace_1Jetson.png"), dpi=150)
         plt.close(fig)
