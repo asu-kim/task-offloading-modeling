@@ -1,4 +1,4 @@
-# Task Offloading Modeling
+# Embodied AI Launcher
 
 This repository provides a Lingua Franca-based framework for modeling, simulating, and deploying transformer-oriented AI inference workloads on heterogeneous platforms. The target use case is task offloading for DAG-structured inference pipelines, where each node represents a computation stage and each edge represents a dependency with communication cost.
 
