@@ -2,9 +2,9 @@ target Python {
     coordination: decentralized
 }
 
-import Jetson from "../lib/deployment/Jetson.lf"
-import A6000 from "../lib/deployment/A6000.lf"
-import Blackwell from "../lib/deployment/Blackwell.lf"
+import Jetson_3devices from "../lib/deployment/Jetson_3devices.lf"
+import A6000_3devices from "../lib/deployment/A6000_3devices.lf"
+import Blackwell_3devices from "../lib/deployment/Blackwell_3devices.lf"
 
 preamble {=
     import sys
@@ -44,11 +44,13 @@ preamble {=
     def sample_deployment_path(*parts):
         return str(SAMPLE_DEPLOYMENT_ROOT.joinpath(*parts))
 
-    def transfer_time_ms(data_size_mb: float, bandwidth_mb_per_sec: int) -> int:
+    SAMPLE_DEPLOYMENT_VIT_INPUT_IMAGE = "dataset128/coco128/images/train2017/example_input.png"
+
+    def transfer_time_ms(data_size_kb: float, bandwidth_mb_per_sec: int) -> int:
         """Transfer duration used by scheduler model (same convention as inference-offloading-scheduler)."""
-        if data_size_mb == 0 or bandwidth_mb_per_sec == 0:
+        if data_size_kb == 0 or bandwidth_mb_per_sec == 0:
             return 0
-        return int(math.ceil(float(data_size_mb) / float(bandwidth_mb_per_sec)))
+        return int(math.ceil(float(data_size_kb) / float(bandwidth_mb_per_sec)))
 
     def channel_delay_ms(system, source_device_index: int, target_device_index: int, data_size_mb: float):
         if source_device_index == target_device_index:
@@ -1135,6 +1137,8 @@ reactor Scheduler {
                 "task": task,
                 "device": task_to_device[task_index],
                 "source_device": task.source_device_index,
+                "input_image": SAMPLE_DEPLOYMENT_VIT_INPUT_IMAGE,
+                "image_path": SAMPLE_DEPLOYMENT_VIT_INPUT_IMAGE,
                 "continuations": continuations
             }
 
@@ -1430,13 +1434,12 @@ reactor OutputVisualizer(bandwidth_csv_path = "data/sample_deployment/Bandwidth.
 }
 
 // main reactor {
-// federated reactor at localhost {
 federated reactor at 10.218.100.78 {
     // @maxwait(5 sec)
     d = new TaskDistributor()
-    r_1 = new Jetson()
-    r_2 = new A6000()
-    r_3 = new Blackwell(dummy_task = False)
+    r_1 = new Jetson_3devices()
+    r_2 = new A6000_3devices()
+    r_3 = new Blackwell_3devices(dummy_task = False)
 
     // e = new EnvironmentUpdateDetector()
     // @maxwait(5 sec)

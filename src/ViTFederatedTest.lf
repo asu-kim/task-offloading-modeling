@@ -1,0 +1,79 @@
+target Python {
+    coordination: decentralized
+}
+
+import Jetson_3devices from "../lib/deployment/Jetson_3devices.lf"
+
+preamble {=
+    from dataclasses import dataclass, field
+    from typing import List
+
+    @dataclass
+    class Task:
+        name: str = ""
+        index: int = 0
+        deadline: int = -1
+        execution_times: List[int] = field(default_factory=list)
+        child_task_indexes: List[int] = field(default_factory=list, repr=False)
+        parent_task_indexes: List[int] = field(default_factory=list, repr=False)
+        input_size: int = 0
+        output_size: int = 0
+        source_device_index: int = 0
+        priority: float = 0
+        ready_time: int = -1
+        current_device: str = ""
+        communication_start_time: int = 0
+        communication_end_time: int = 0
+        computation_start_time: int = 0
+        computation_end_time: int = 0
+=}
+
+reactor VITTaskSource {
+    output task_chains
+
+    reaction(startup) -> task_chains {=
+        task = Task(
+            name="VIT1",
+            index=0,
+            deadline=60_000,
+            execution_times=[1, 1, 1],
+            input_size=0,
+            output_size=0,
+            source_device_index=0,
+        )
+        image_path = "dataset128/coco128/images/train2017/000000000025.jpg"
+        task_chains.set([{
+            "task": task,
+            "device": 0,
+            "source_device": 0,
+            "input_image": image_path,
+            "image_path": image_path,
+            "continuations": [],
+        }])
+    =}
+}
+
+reactor ResultSink {
+    input result
+
+    reaction(result) {=
+        task = result.value
+        print(
+            f"ViTFederatedTest complete: task={task.name}, "
+            f"input={getattr(task, 'yolos_input', None)}, "
+            f"latency_ms={getattr(task, 'yolos_inference_ms', None)}, "
+            f"detections={getattr(task, 'yolos_detection_count', None)}",
+            flush=True,
+        )
+        request_stop()
+    =}
+}
+
+federated reactor at localhost {
+    source = new VITTaskSource()
+    jetson = new Jetson_3devices()
+    sink = new ResultSink()
+
+    source.task_chains -> jetson.task_chains
+    jetson.final_output -> sink.result
+}

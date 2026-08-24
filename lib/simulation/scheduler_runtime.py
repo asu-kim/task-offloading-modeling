@@ -10,10 +10,10 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
-def transfer_time_ms(data_size_mb: float, bandwidth_mb_per_sec: int) -> int:
-    if data_size_mb == 0 or bandwidth_mb_per_sec == 0:
+def transfer_time_ms(data_size_kb: float, bandwidth_mb_per_sec: int) -> int:
+    if data_size_kb == 0 or bandwidth_mb_per_sec == 0:
         return 0
-    return int(math.ceil(float(data_size_mb) / float(bandwidth_mb_per_sec)))
+    return int(math.ceil(float(data_size_kb) / float(bandwidth_mb_per_sec)))
 
 
 def device_name_to_type_index(device_name: str) -> int | None:

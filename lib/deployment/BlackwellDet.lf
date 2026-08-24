@@ -13,10 +13,10 @@ preamble {=
     time_unit = 1
     network_available_sec = 0.0
 
-    def transfer_time_ms(data_size_mb: float, bandwidth_mb_per_sec: int) -> int:
-        if data_size_mb == 0 or bandwidth_mb_per_sec == 0:
+    def transfer_time_ms(data_size_kb: float, bandwidth_mb_per_sec: int) -> int:
+        if data_size_kb == 0 or bandwidth_mb_per_sec == 0:
             return 0
-        return int(math.ceil(float(data_size_mb) / float(bandwidth_mb_per_sec)))
+        return int(math.ceil(float(data_size_kb) / float(bandwidth_mb_per_sec)))
 
     def _apply_network_info(reactor, info):
         if not isinstance(info, dict):
@@ -102,7 +102,9 @@ preamble {=
             return
         task = reactor.current_packet.get("task")
         intended_end_ms = getattr(task, "computation_end_time", 0) if task is not None else 0
-        now_ms = lf.time.logical_elapsed() / 1e6
+        # Use physical elapsed time to avoid over-padding when logical time is not
+        # advancing during asynchronous model execution.
+        now_ms = lf.time.physical_elapsed() / 1e6
         wait_ms = max(0, int(math.ceil(float(intended_end_ms) - now_ms)))
         end_execution.schedule(MSEC(wait_ms))
 

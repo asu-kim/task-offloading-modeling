@@ -1,7 +1,6 @@
 target Python
 preamble {=
     import gc
-    import math
     import os
     import pprint
     import threading
@@ -11,102 +10,6 @@ preamble {=
     from typing import Deque, List, Tuple
 
     time_unit = 1
-    network_available_sec = 0.0
-
-    def transfer_time_ms(data_size_kb: float, bandwidth_mb_per_sec: int) -> int:
-        if data_size_kb == 0 or bandwidth_mb_per_sec == 0:
-            return 0
-        return int(math.ceil(float(data_size_kb) / float(bandwidth_mb_per_sec)))
-
-    def _apply_network_info(reactor, info):
-        if not isinstance(info, dict):
-            return
-        reactor.bandwidth = info.get("bandwidth", [])
-        reactor.latency = info.get("latency", [])
-
-    def _network_receiver_delay_ms(reactor, packet):
-        if not isinstance(packet, dict):
-            return 0
-
-        sender_device = packet.get("sender_device")
-        receiver_device = reactor.device_index
-        payload_size = packet.get("payload_size", 0)
-
-        latency_ms = 0
-        bandwidth = 0
-        try:
-            if sender_device is not None:
-                latency_ms = reactor.latency[sender_device][receiver_device]
-                bandwidth = reactor.bandwidth[sender_device][receiver_device]
-        except (IndexError, TypeError):
-            latency_ms = 0
-            bandwidth = 0
-
-        transfer_ms = transfer_time_ms(payload_size, bandwidth) if bandwidth > 0 else 0
-        return int(latency_ms) + int(transfer_ms)
-
-    def _network_source_key(packet):
-        sender_device = packet.get("sender_device") if isinstance(packet, dict) else None
-        return str(sender_device) if sender_device is not None else "unknown"
-
-    def _queue_network_receiver_packet(reactor, packet, delay_action):
-        global network_available_sec
-        if not isinstance(packet, dict):
-            return
-
-        source_key = _network_source_key(packet)
-        now_sec = lf.time.logical_elapsed() / 1e9
-        delay_ms = _network_receiver_delay_ms(reactor, packet)
-        network_start_sec = max(now_sec, network_available_sec)
-        network_end_sec = network_start_sec + (float(delay_ms) / 1000.0)
-        network_available_sec = network_end_sec
-
-        packet["network_start_time_sec"] = network_start_sec
-        packet["network_end_time_sec"] = network_end_sec
-
-        pending = reactor.network_pending_packets.setdefault(source_key, [])
-        pending.append(packet)
-        pending.sort(key=lambda pending_packet: pending_packet["network_end_time_sec"])
-
-        wait_ms = max(0, int((network_end_sec - now_sec) * 1000.0 + 0.999999))
-        delay_action.schedule(MSEC(wait_ms))
-        task = packet.get("task")
-        task_name = task.name if task is not None else "unknown"
-        print(f"{reactor.device_name}: Queued network delivery for task {task_name} "
-              f"from {network_start_sec * 1000.0:.1f} ms to {network_end_sec * 1000.0:.1f} ms")
-
-    def _pop_ready_network_receiver_packet(reactor, source_key, delay_action):
-        now_sec = lf.time.logical_elapsed() / 1e9
-        pending = reactor.network_pending_packets.setdefault(source_key, [])
-        pending.sort(key=lambda packet: packet["network_end_time_sec"])
-
-        if len(pending) == 0:
-            return None
-
-        packet = pending[0]
-        if packet["network_end_time_sec"] > now_sec + 1e-9:
-            wait_ms = max(1, int((packet["network_end_time_sec"] - now_sec) * 1000.0 + 0.999999))
-            delay_action.schedule(MSEC(wait_ms))
-            return None
-
-        packet = pending.pop(0)
-        if len(pending) > 0:
-            next_packet = pending[0]
-            wait_ms = max(0, int((next_packet["network_end_time_sec"] - now_sec) * 1000.0 + 0.999999))
-            delay_action.schedule(MSEC(wait_ms))
-
-        return packet
-
-    def _schedule_deterministic_end(reactor, end_execution):
-        if reactor.current_packet is None:
-            return
-        task = reactor.current_packet.get("task")
-        intended_end_ms = getattr(task, "computation_end_time", 0) if task is not None else 0
-        # Use physical elapsed time to avoid over-padding when logical time is not
-        # advancing during asynchronous model execution.
-        now_ms = lf.time.physical_elapsed() / 1e6
-        wait_ms = max(0, int(math.ceil(float(intended_end_ms) - now_ms)))
-        end_execution.schedule(MSEC(wait_ms))
 
     @dataclass
     class Task:
@@ -189,17 +92,14 @@ preamble {=
             reactor.current_packet = reactor.task_queue.pop(0)
             task = reactor.current_packet["task"]
             print(f"{reactor.device_name}: Schedule task {task.name}")
-            intended_start_ms = getattr(task, "computation_start_time", 0)
-            now_ms = lf.time.logical_elapsed() / 1e6
-            wait_ms = max(0, int(math.ceil(float(intended_start_ms) - now_ms)))
-            start_execution.schedule(MSEC(wait_ms))
+            start_execution.schedule(MSEC(1))
 
     def _record_arrived_packet(reactor, packet):
         if not isinstance(packet, dict):
             return
         sender_device = packet.get("sender_device")
-        start_time_sec = packet.get("network_start_time_sec", packet.get("sent_time_sec"))
-        end_time_sec = packet.get("network_end_time_sec", lf.time.logical_elapsed() / 1e9)
+        start_time_sec = packet.get("sent_time_sec")
+        end_time_sec = lf.time.physical_elapsed() / 1e9
         task = packet.get("task")
         if sender_device is None or start_time_sec is None or task is None:
             return
@@ -942,7 +842,7 @@ preamble {=
 
 =}
 
-reactor Jetson(device_index = 0, device_name = "Jetson", dummy_task = False) {
+reactor Jetson_3devices(device_index = 0, device_name = "Jetson", dummy_task = False) {
     state task_queue = []
     state current_packet
     state pending_task_packets
@@ -951,15 +851,11 @@ reactor Jetson(device_index = 0, device_name = "Jetson", dummy_task = False) {
     state trace_events = []
     state current_comp_start_time = 0.0
     state pending_packets = []
-    state network_pending_packets
-    state bandwidth = []
-    state latency = []
     state llm_results
     state yolo_results
     state llm_thread
     state llm_error
 
-    input network_info
     input task_chains
     input recv_edge
     input recv_cloudlet
@@ -968,9 +864,6 @@ reactor Jetson(device_index = 0, device_name = "Jetson", dummy_task = False) {
     logical action end_execution
     logical action send_packet
     physical action llm_done
-    logical action comm_delay_0
-    logical action comm_delay_1
-    logical action comm_delay_2
 
     output send_edge
     output send_cloudlet
@@ -985,9 +878,6 @@ reactor Jetson(device_index = 0, device_name = "Jetson", dummy_task = False) {
         self.completed_task_indexes = set()
         self.trace_events = []
         self.pending_packets = []
-        self.network_pending_packets = {}
-        self.bandwidth = []
-        self.latency = []
         self.llm_results = {}
         self.yolo_results = {}
         self.llm_thread = None
@@ -1000,17 +890,13 @@ reactor Jetson(device_index = 0, device_name = "Jetson", dummy_task = False) {
             request_stop()
     =}
 
-    reaction(network_info) {=
-        _apply_network_info(self, network_info.value)
-    =}
-
     reaction(start_execution) -> end_execution, llm_done {=
         if self.current_packet is None:
             return
 
         elapsed_logical_time = lf.time.logical_elapsed()
         elapsed_physical_time = lf.time.physical_elapsed()
-        self.current_comp_start_time = lf.time.logical_elapsed() / 1e9
+        self.current_comp_start_time = lf.time.physical_elapsed() / 1e9
 
         task = self.current_packet["task"]
         print(f"{self.device_name}: Execute task {task.name}")
@@ -1058,7 +944,7 @@ reactor Jetson(device_index = 0, device_name = "Jetson", dummy_task = False) {
                         print(f"{self.device_name}: Dummy YOLO task {task.name} failed: {exc}", flush=True)
                         request_stop()
                         return
-                    _schedule_deterministic_end(self, end_execution)
+                    end_execution.schedule(0)
 
                 threading.Thread(target=worker, daemon=True).start()
                 return
@@ -1068,10 +954,10 @@ reactor Jetson(device_index = 0, device_name = "Jetson", dummy_task = False) {
                 print(f"{self.device_name}: YOLOS task {task.name} failed: {exc}", flush=True)
                 request_stop()
                 return
-            _schedule_deterministic_end(self, end_execution)
+            end_execution.schedule(0)
         else:
             time.sleep(exec_time_ms / 1000.0 / time_unit)
-            _schedule_deterministic_end(self, end_execution)
+            end_execution.schedule(MSEC(int(exec_time_ms)))
     =} deadline(10000 sec) {=
         print(f"In {self.device_name}'s deadline handler.")
         elapsed_logical_time = lf.time.logical_elapsed()
@@ -1086,7 +972,7 @@ reactor Jetson(device_index = 0, device_name = "Jetson", dummy_task = False) {
         if self.llm_error is not None:
             request_stop()
             return
-        _schedule_deterministic_end(self, end_execution)
+        end_execution.schedule(0)
     =}
 
     reaction(end_execution) -> start_execution, send_packet, final_output, trace_output {=
@@ -1096,7 +982,7 @@ reactor Jetson(device_index = 0, device_name = "Jetson", dummy_task = False) {
         completed_packet = self.current_packet
         completed_task = completed_packet["task"]
         task_index = completed_task.index
-        end_time_sec = lf.time.logical_elapsed() / 1e9
+        end_time_sec = lf.time.physical_elapsed() / 1e9
         end_ms = end_time_sec * 1000.0
         deadline_ms = int(completed_task.deadline) if completed_task.deadline is not None else -1
         deadline_met = True if deadline_ms <= 0 else (end_ms <= float(deadline_ms))
@@ -1152,7 +1038,7 @@ reactor Jetson(device_index = 0, device_name = "Jetson", dummy_task = False) {
         destination_device = packet.get("device") if isinstance(packet, dict) else None
         if isinstance(packet, dict):
             packet["sender_device"] = self.device_index
-            packet["sent_time_sec"] = lf.time.logical_elapsed() / 1e9
+            packet["sent_time_sec"] = lf.time.physical_elapsed() / 1e9
         if destination_device == 1:
             send_edge.set(packet)
         elif destination_device == 2:
@@ -1172,9 +1058,6 @@ reactor Jetson(device_index = 0, device_name = "Jetson", dummy_task = False) {
         self.completed_task_indexes = set()
         self.trace_events = []
         self.pending_packets = []
-        self.network_pending_packets = {}
-        self.bandwidth = []
-        self.latency = []
         self.llm_results = {}
         self.yolo_results = {}
         self.llm_thread = None
@@ -1202,23 +1085,12 @@ reactor Jetson(device_index = 0, device_name = "Jetson", dummy_task = False) {
         trace_output.set(self.trace_events)
     =}
 
-    reaction(recv_edge, recv_cloudlet) -> comm_delay_1, comm_delay_2 {=
-        if recv_edge.is_present:
-            _queue_network_receiver_packet(self, recv_edge.value, comm_delay_1)
-        if recv_cloudlet.is_present:
-            _queue_network_receiver_packet(self, recv_cloudlet.value, comm_delay_2)
-    =}
-
-    reaction(comm_delay_1, comm_delay_2) -> start_execution, send_packet {=
+    reaction(recv_edge, recv_cloudlet) -> start_execution, send_packet {=
         packets = []
-        if comm_delay_1.is_present:
-            packet = _pop_ready_network_receiver_packet(self, "1", comm_delay_1)
-            if packet is not None:
-                packets.append(packet)
-        if comm_delay_2.is_present:
-            packet = _pop_ready_network_receiver_packet(self, "2", comm_delay_2)
-            if packet is not None:
-                packets.append(packet)
+        if recv_edge.is_present:
+            packets.append(recv_edge.value)
+        if recv_cloudlet.is_present:
+            packets.append(recv_cloudlet.value)
 
         for packet in packets:
             if isinstance(packet, dict) and packet.get("device") == self.device_index:

@@ -1,0 +1,488 @@
+target Python
+preamble {=
+    import os
+    import pprint
+    import time
+    from collections import deque
+    from dataclasses import dataclass, field
+    from typing import Deque, List, Tuple
+
+    time_unit = 1
+    cloudlet_llm_default_question = "What is the opposite of tall?"
+
+    @dataclass
+    class Device:
+        name: str = ""
+        index: int = 0
+        task_queue: Deque["Task"] = field(default_factory=deque)
+        comm_channel_available: int = 0
+        comm_queue: list[Tuple[str, int, int]] = field(default_factory=list)
+
+    @dataclass
+    class Task:
+        name: str = ""
+        index: int = 0
+        deadline: int = -1
+        execution_times: List[int] = field(default_factory=list)
+        child_task_indexes: List[int] = field(default_factory=list, repr=False)
+        parent_task_indexes: List[int] = field(default_factory=list, repr=False)
+        input_size: int = 0
+        output_size: int = 0
+        source_device_index: int = 0
+        priority: float = 0
+        ready_time: int = -1
+        current_device: str = ""
+        communication_start_time: int = 0
+        communication_end_time: int = 0
+        computation_start_time: int = 0
+        computation_end_time: int = 0
+
+    def _accept_chain_packet(reactor, packet):
+        if not isinstance(packet, dict) or "task" not in packet or "device" not in packet:
+            return
+        if packet["device"] != reactor.device_index:
+            return
+
+        task = packet["task"]
+        task_index = task.index
+        if task_index in reactor.completed_task_indexes:
+            return
+        if reactor.current_packet is not None and reactor.current_packet["task"].index == task_index:
+            return
+
+        if task_index not in reactor.pending_task_packets:
+            reactor.pending_task_packets[task_index] = packet
+
+        parent_task = packet.get("parent_task")
+        reactor.received_parent_indexes.setdefault(task_index, set())
+        if parent_task is not None:
+            reactor.received_parent_indexes[task_index].add(parent_task.index)
+
+        required_parents = set(task.parent_task_indexes)
+        received_parents = reactor.received_parent_indexes[task_index]
+        if len(required_parents) > 0 and not required_parents.issubset(received_parents):
+            print(f"{reactor.device_name}: Waiting for parents of task {task.name}. "
+                  f"received={sorted(received_parents)}, required={sorted(required_parents)}")
+            return
+
+        if any(queued["task"].index == task_index for queued in reactor.task_queue):
+            return
+        reactor.task_queue.append(reactor.pending_task_packets[task_index])
+
+    def _schedule_next_chain_task(reactor, start_execution):
+        if reactor.current_packet is None and len(reactor.task_queue) > 0:
+            reactor.current_packet = reactor.task_queue.pop(0)
+            task = reactor.current_packet["task"]
+            print(f"{reactor.device_name}: Schedule task {task.name}")
+            start_execution.schedule(MSEC(1))
+
+    def _record_arrived_packet(reactor, packet):
+        if not isinstance(packet, dict):
+            return
+        sender_device = packet.get("sender_device")
+        start_time_sec = packet.get("sent_time_sec")
+        end_time_sec = lf.time.physical_elapsed() / 1e9
+        task = packet.get("task")
+        if sender_device is None or start_time_sec is None or task is None:
+            return
+        if sender_device == reactor.device_index:
+            return
+
+        reactor.trace_events.append({
+            "type": "comm_send",
+            "task_name": task.name,
+            "from_device": sender_device,
+            "to_device": reactor.device_index,
+            "start_time": start_time_sec,
+            "end_time": end_time_sec,
+            "duration_ms": max(0.0, (end_time_sec - start_time_sec) * 1000.0),
+            "completion_time": end_time_sec,
+            "output_size": packet.get("payload_size", 0)
+        })
+
+    def _is_llm_task(task):
+        task_name = getattr(task, "name", "")
+        return isinstance(task_name, str) and task_name.upper().startswith("LLM")
+
+    def _is_vit_task(task):
+        task_name = getattr(task, "name", "")
+        return isinstance(task_name, str) and task_name.upper().startswith("VIT")
+
+    def _task_snapshot(task):
+        if task is None:
+            return None
+        try:
+            return dict(vars(task))
+        except TypeError:
+            return str(task)
+
+    def _packet_snapshot(packet):
+        if not isinstance(packet, dict):
+            return packet
+
+        snapshot = {}
+        for key, value in packet.items():
+            if key == "task":
+                snapshot[key] = _task_snapshot(value)
+            elif key == "input_image_bytes" and isinstance(value, (bytes, bytearray, memoryview)):
+                snapshot[key] = {"type": "bytes", "size": len(value)}
+            elif key == "parent_task":
+                snapshot[key] = _task_snapshot(value)
+            elif key == "continuations" and isinstance(value, list):
+                continuation_snapshot = []
+                for continuation in value:
+                    if isinstance(continuation, dict):
+                        continuation_snapshot.append({
+                            continuation_key: _task_snapshot(continuation_value) if continuation_key == "task" else continuation_value
+                            for continuation_key, continuation_value in continuation.items()
+                        })
+                    else:
+                        continuation_snapshot.append(continuation)
+                snapshot[key] = continuation_snapshot
+            else:
+                snapshot[key] = value
+        return snapshot
+
+    def _attach_parent_yolos_output(packet, completed_task):
+        if not isinstance(packet, dict) or completed_task is None:
+            return
+
+        yolos_fields = {
+            "parent_yolos_input": getattr(completed_task, "yolos_input", None),
+            "parent_yolos_inference_ms": getattr(completed_task, "yolos_inference_ms", None),
+            "parent_yolos_speed": getattr(completed_task, "yolos_speed", None),
+            "parent_yolos_detection_count": getattr(completed_task, "yolos_detection_count", None),
+            "parent_yolos_detections": getattr(completed_task, "yolos_detections", None),
+        }
+        if not any(value is not None for value in yolos_fields.values()):
+            return
+
+        for key, value in yolos_fields.items():
+            packet[key] = value
+
+    def _read_transfer_image_tensor_bytes(image_ref):
+        if not image_ref or not isinstance(image_ref, str):
+            return None, None
+
+        candidate_path = os.path.expanduser(image_ref)
+        if not os.path.isabs(candidate_path):
+            candidate_path = os.path.abspath(candidate_path)
+        if not os.path.isfile(candidate_path):
+            return None, None
+
+        try:
+            from PIL import Image
+            with Image.open(candidate_path) as image_obj:
+                rgb_image = image_obj.convert("RGB")
+                width, height = rgb_image.size
+                return rgb_image.tobytes(), (height, width, 3)
+        except BaseException as exc:
+            print(f"Failed to read transfer image bytes from {candidate_path}: {exc}", flush=True)
+            return None, None
+
+    def _assign_packet_image(packet, image_ref):
+        if not isinstance(packet, dict) or not image_ref:
+            return
+        packet["input_image"] = image_ref
+        packet["image_path"] = image_ref
+        image_bytes, image_shape = _read_transfer_image_tensor_bytes(image_ref)
+        if image_bytes is not None:
+            packet["input_image_bytes"] = image_bytes
+            packet["input_image_shape"] = image_shape
+            packet["input_image_byte_count"] = len(image_bytes)
+
+    def _pick_transfer_image(packet=None, completed_task=None):
+        if isinstance(packet, dict):
+            for key in ["input_image", "image_path", "parent_yolos_input"]:
+                value = packet.get(key)
+                if value:
+                    return value
+
+        if completed_task is not None:
+            for attr in ["input_image", "image_path", "yolos_input"]:
+                value = getattr(completed_task, attr, None)
+                if value:
+                    return value
+
+        return None
+
+    def _attach_transfer_image(packet, completed_task=None):
+        image_ref = _pick_transfer_image(packet=packet, completed_task=completed_task)
+        _assign_packet_image(packet, image_ref)
+
+    def _log_received_parent_yolos_output(reactor, packet):
+        if not isinstance(packet, dict):
+            return
+
+        payload = {
+            "input": packet.get("parent_yolos_input"),
+            "inference_ms": packet.get("parent_yolos_inference_ms"),
+            "speed": packet.get("parent_yolos_speed"),
+            "detection_count": packet.get("parent_yolos_detection_count"),
+            "detections": packet.get("parent_yolos_detections"),
+        }
+        if not any(value is not None for value in payload.values()):
+            return
+
+        parent_task = packet.get("parent_task")
+        next_task = packet.get("task")
+        parent_name = getattr(parent_task, "name", "<unknown>")
+        next_name = getattr(next_task, "name", "<unknown>")
+        print(
+            f"{reactor.device_name}: Received YOLOS payload from {parent_name} for {next_name}:\n"
+            f"{pprint.pformat(payload, sort_dicts=False)}",
+            flush=True,
+        )
+
+    def _execute_emulated_task(reactor, task):
+        exec_time_ms = task.execution_times[reactor.device_index]
+        packet_snapshot = _packet_snapshot(reactor.current_packet)
+        task_snapshot = _task_snapshot(task)
+
+        if _is_llm_task(task):
+            task.llm_question = getattr(task, "llm_question", None) or cloudlet_llm_default_question
+            task.llm_answer = f"dummy-answer-for-{task.name}"
+            task.llm_inference_ms = 0
+            reactor.llm_results[task.index] = {
+                "question": task.llm_question,
+                "answer": task.llm_answer,
+                "inference_ms": 0,
+                "dummy_task": True,
+            }
+            if reactor.current_packet is not None:
+                reactor.current_packet["llm_question"] = task.llm_question
+                reactor.current_packet["llm_answer"] = task.llm_answer
+                reactor.current_packet["llm_inference_ms"] = 0
+        elif _is_vit_task(task):
+            input_label = _pick_transfer_image(packet=reactor.current_packet, completed_task=task) or "synthetic-zero-image"
+            task.yolos_input = input_label
+            task.input_image = input_label
+            task.image_path = input_label
+            task.yolos_inference_ms = 0
+            task.yolos_speed = {"dummy": 0}
+            task.yolos_detection_count = 0
+            task.yolos_detections = []
+            reactor.yolo_results[task.index] = {
+                "input": task.yolos_input,
+                "inference_ms": 0,
+                "speed": task.yolos_speed,
+                "detections": task.yolos_detection_count,
+                "details": task.yolos_detections,
+                "dummy_task": True,
+            }
+            if reactor.current_packet is not None:
+                reactor.current_packet["yolos_input"] = task.yolos_input
+                reactor.current_packet["input_image"] = input_label
+                reactor.current_packet["image_path"] = input_label
+                reactor.current_packet["yolos_inference_ms"] = 0
+                reactor.current_packet["yolos_speed"] = task.yolos_speed
+                reactor.current_packet["yolos_detection_count"] = task.yolos_detection_count
+                reactor.current_packet["yolos_detections"] = task.yolos_detections
+
+        print(f"{reactor.device_name}: Emulated task for {task.name}", flush=True)
+        print(f"{reactor.device_name}: Emulated task input packet:\n{pprint.pformat(packet_snapshot, sort_dicts=False)}", flush=True)
+        print(f"{reactor.device_name}: Emulated task input task object:\n{pprint.pformat(task_snapshot, sort_dicts=False)}", flush=True)
+        time.sleep(exec_time_ms / 1000.0 / time_unit)
+        return exec_time_ms
+=}
+
+reactor EmulatedJetson(device_index = 1, device_name = "Jetson_2", dummy_task = True) {
+    state task_queue = []
+    state current_packet
+    state pending_task_packets
+    state received_parent_indexes
+    state completed_task_indexes = []
+    state trace_events = []
+    state current_comp_start_time = 0.0
+    state pending_packets = []
+    state llm_results
+    state yolo_results
+
+    input task_chains
+    input recv_jetson
+    input recv_a6000
+    input recv_blackwell
+
+    logical action start_execution
+    logical action end_execution
+    logical action send_packet
+
+    output send_jetson
+    output send_a6000
+    output send_blackwell
+    output final_output
+    output trace_output
+    output ready
+
+    reaction(startup) -> ready {=
+        self.task_queue = []
+        self.current_packet = None
+        self.pending_task_packets = {}
+        self.received_parent_indexes = {}
+        self.completed_task_indexes = set()
+        self.trace_events = []
+        self.pending_packets = []
+        self.llm_results = {}
+        self.yolo_results = {}
+        print(f"{self.device_name}: Startup ML warmup skipped in emulated mode.", flush=True)
+        ready.set(True)
+    =}
+
+    reaction(start_execution) -> end_execution {=
+        if self.current_packet is None:
+            return
+
+        elapsed_logical_time = lf.time.logical_elapsed()
+        elapsed_physical_time = lf.time.physical_elapsed()
+        self.current_comp_start_time = lf.time.physical_elapsed() / 1e9
+
+        task = self.current_packet["task"]
+        print(f"{self.device_name}: Execute task {task.name}")
+        print(f"{self.device_name}: Tag = ({elapsed_logical_time}, {lf.tag().microstep}) "
+              f"and physical time = {elapsed_physical_time}")
+        exec_time_ms = task.execution_times[self.device_index]
+        if _is_llm_task(task) or _is_vit_task(task):
+            _execute_emulated_task(self, task)
+            end_execution.schedule(0)
+        else:
+            time.sleep(exec_time_ms / 1000.0 / time_unit)
+            end_execution.schedule(0)
+    =} deadline(10000 sec) {=
+        print(f"In {self.device_name}'s deadline handler.")
+        elapsed_logical_time = lf.time.logical_elapsed()
+        elapsed_physical_time = lf.time.physical_elapsed()
+        print(f"Logical time = {elapsed_logical_time} and physical time = {elapsed_physical_time}")
+    =}
+
+    reaction(end_execution) -> start_execution, send_packet, final_output, trace_output {=
+        if self.current_packet is None:
+            return
+
+        completed_packet = self.current_packet
+        completed_task = completed_packet["task"]
+        task_index = completed_task.index
+        end_time_sec = lf.time.physical_elapsed() / 1e9
+        end_ms = end_time_sec * 1000.0
+        deadline_ms = int(completed_task.deadline) if completed_task.deadline is not None else -1
+        deadline_met = True if deadline_ms <= 0 else (end_ms <= float(deadline_ms))
+
+        self.trace_events.append({
+            "type": "comp",
+            "task_index": task_index,
+            "task_name": completed_task.name,
+            "device_index": self.device_index,
+            "device_name": self.device_name,
+            "start_time": self.current_comp_start_time,
+            "end_time": end_time_sec,
+            "duration_ms": max(0.0, (end_time_sec - self.current_comp_start_time) * 1000.0),
+            "completion_time": end_time_sec,
+            "deadline_ms": deadline_ms,
+            "deadline_met": deadline_met
+        })
+
+        self.completed_task_indexes.add(task_index)
+        self.pending_task_packets.pop(task_index, None)
+        self.received_parent_indexes.pop(task_index, None)
+        self.current_packet = None
+
+        for continuation in completed_packet.get("continuations", []):
+            next_packet = dict(continuation)
+            next_packet["parent_task"] = completed_task
+            _attach_parent_yolos_output(next_packet, completed_task)
+            _attach_transfer_image(next_packet, completed_task=completed_task)
+            if _is_llm_task(completed_task):
+                next_packet["parent_llm_answer"] = getattr(completed_task, "llm_answer", None)
+            destination_device = next_packet.get("device")
+
+            if destination_device == self.device_index:
+                _accept_chain_packet(self, next_packet)
+                continue
+
+            next_packet["payload_size"] = completed_task.output_size
+            self.pending_packets.append(next_packet)
+            print(f"{self.device_name}: Forwarding task {next_packet['task'].name} to device {destination_device}")
+
+        if len(self.pending_packets) > 0:
+            send_packet.schedule(0)
+        final_output.set(completed_task)
+        trace_output.set(self.trace_events)
+        _schedule_next_chain_task(self, start_execution)
+    =}
+
+    reaction(send_packet) -> send_jetson, send_a6000, send_blackwell, send_packet {=
+        if len(self.pending_packets) == 0:
+            return
+
+        packet = self.pending_packets.pop(0)
+        destination_device = packet.get("device") if isinstance(packet, dict) else None
+        if isinstance(packet, dict):
+            packet["sender_device"] = self.device_index
+            packet["sent_time_sec"] = lf.time.physical_elapsed() / 1e9
+        if destination_device in [0, 1] and destination_device != self.device_index:
+            send_jetson.set(packet)
+        elif destination_device == 2:
+            send_a6000.set(packet)
+        elif destination_device == 3:
+            send_blackwell.set(packet)
+        else:
+            print(f"{self.device_name}: Error - invalid direct destination {destination_device}")
+
+        if len(self.pending_packets) > 0:
+            send_packet.schedule(0)
+    =}
+
+    reaction(task_chains) -> start_execution, send_packet, trace_output {=
+        self.task_queue = []
+        self.current_packet = None
+        self.pending_task_packets = {}
+        self.received_parent_indexes = {}
+        self.completed_task_indexes = set()
+        self.trace_events = []
+        self.pending_packets = []
+        self.llm_results = {}
+        self.yolo_results = {}
+
+        chains = task_chains.value if task_chains.is_present and isinstance(task_chains.value, list) else []
+        print(f"{self.device_name}: Received {len(chains)} initial chain packet(s).")
+
+        for packet in chains:
+            if isinstance(packet, dict) and packet.get("device") == self.device_index:
+                _accept_chain_packet(self, packet)
+            else:
+                if isinstance(packet, dict) and "task" in packet and "device" in packet:
+                    task = packet["task"]
+                    destination_device = packet["device"]
+                    packet["payload_size"] = task.input_size
+                    _attach_transfer_image(packet)
+                    print(f"{self.device_name}: Forwarding input data for task {task.name} "
+                          f"to device {destination_device}")
+                self.pending_packets.append(packet)
+
+        if len(self.pending_packets) > 0:
+            send_packet.schedule(0)
+        _schedule_next_chain_task(self, start_execution)
+        trace_output.set(self.trace_events)
+    =}
+
+    reaction(recv_jetson, recv_a6000, recv_blackwell) -> start_execution, send_packet {=
+        packets = []
+        if recv_jetson.is_present:
+            packets.append(recv_jetson.value)
+        if recv_a6000.is_present:
+            packets.append(recv_a6000.value)
+        if recv_blackwell.is_present:
+            packets.append(recv_blackwell.value)
+
+        for packet in packets:
+            if isinstance(packet, dict) and packet.get("device") == self.device_index:
+                _record_arrived_packet(self, packet)
+                _log_received_parent_yolos_output(self, packet)
+                _accept_chain_packet(self, packet)
+            else:
+                self.pending_packets.append(packet)
+
+        if len(self.pending_packets) > 0:
+            send_packet.schedule(0)
+        _schedule_next_chain_task(self, start_execution)
+    =}
+}

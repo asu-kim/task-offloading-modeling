@@ -1,0 +1,16 @@
+Overall Metrics
+total_tasks: 4
+first_start_ms: 0.000
+last_finish_ms: 792.000
+makespan_ms: 792.000
+deadline_miss_count: 1
+deadline_miss_rate: 0.250000
+max_tardiness_ms: 22.000
+average_tardiness_ms: 5.500
+
+Per-Task Results
+task_name,device_name,start_ms,end_ms,deadline_ms,deadline_status,tardiness_ms
+VIT1,Jetson_1,0.000,112.000,200.000,OK,0.000
+VIT2,A6000,140.000,180.000,200.000,OK,0.000
+LLM1,A6000,278.000,767.000,770.000,OK,0.000
+LLM2,Blackwell,202.000,792.000,770.000,MISSED,22.000

@@ -48,8 +48,8 @@ The scheduler reads the task file row by row. The current parser consumes the co
 | `ET on A` | Execution time on device type A / Jetson in milliseconds |
 | `ET on B` | Execution time on device type B / A6000 in milliseconds |
 | `ET on C` | Execution time on device type C / Blackwell in milliseconds |
-| `Input Size` | Input payload size |
-| `Output Size` | Output payload size |
+| `Input Size` | Input payload size in kilobytes (KB) |
+| `Output Size` | Output payload size in kilobytes (KB) |
 | `Source` | Present in the CSV, currently not used by the main parser |
 | `Destination` | Present in the CSV, currently not used by the main parser |
 
@@ -198,7 +198,13 @@ Compile:
 lfc src/sample_deployment.lf
 ```
 
-Run the generated federates from `fed-gen/sample_deployment/` according to your deployment host configuration in `src/sample_deployment.lf`. The generated folder includes the RTI and per-federate executables.
+Run the generated federates from `fed-gen/sample_deployment/`. The generated folder includes the RTI and per-federate executables.
+
+Before running a distributed deployment, update the `federated reactor at ...` host in your deployment file (for example `src/sample_deployment.lf` or `src/sample_deployment_deterministic.lf`):
+
+- The repository default is `localhost` (safe/local placeholder).
+- Replace `localhost` with the IP address of the machine where the RTI process will run.
+- Use the same RTI host IP for all participating federates.
 
 Expected result:
 
@@ -256,9 +262,5 @@ Run the generated federates from `fed-gen/ViTTest/`.
 
 The current vision test uses an image from `dataset128/coco128/images/train2017/`.
 
-## Current Status
-
-- Simulation support is available and produces a scheduling trace figure.
-- Federated deployment support is available for server-side execution flows.
-- Blackwell includes LLM and vision execution paths for focused tests.
-- Jetson deployment support is incomplete and currently documented as a placeholder.
+# ToDo Lists
+ - [] Deterministic execution for deployment
