@@ -1,19 +1,30 @@
 # Jetson deployment dependencies for YOLOS TensorRT and LLM TensorRT-LLM tasks.
 #
-# Install Jetson/CUDA-specific packages from NVIDIA sources matching your
-# JetPack version before or alongside this file:
-# - torch
-# - torchvision
-# - tensorrt
-# - tensorrt-llm / tensorrt_llm
+# Target: JetPack 6.2.1 (L4T R36.4.x) / CUDA 12.6 / Python 3.10 / aarch64
 #
-# The regular PyPI wheels for those packages may not match Jetson aarch64,
-# CUDA, TensorRT, or JetPack versions.
+# torch, torchvision are pulled from the NVIDIA Jetson index below. Regular
+# PyPI wheels are built for CUDA 13.x and will fail at runtime with
+# "NVIDIA driver on your system is too old".
+#
+# tensorrt is provided by JetPack itself (apt, system Python). Do NOT pip
+# install it. tensorrt-llm must be built or installed separately from a
+# Jetson-compatible source.
+
+--extra-index-url https://pypi.jetson-ai-lab.io/jp6/cu126
+
+torch==2.8.0
+torchvision==0.23.0
+
+# NumPy must stay on 1.x: the Jetson torch wheels are compiled against the
+# NumPy 1.x C ABI. Installing numpy>=2 breaks torch.from_numpy() and
+# tensor.numpy() with "RuntimeError: Numpy is not available".
+numpy==1.26.4
+
+# opencv-python 5.x requires numpy>=2, which conflicts with the pin above.
+opencv-python<5
 
 accelerate
 cuda-python
-numpy
-opencv-python
 pandas
 Pillow
 tokenizers
